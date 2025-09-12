@@ -1,0 +1,20 @@
+* EXCEPTION:
+* EXCEPTION: ~Runtime#add_to_require_queue~ failed for =app/main.rb=.
+* ERROR - :block_types method missing on ~Class~.
+
+#+begin_src ~Class#inspect~
+Game
+#+end_src ~Class#inspect~
+
+** Did you mean?
+Here's a list of methods that kind of look like :block_types.
+*** :block_given?
+
+The method named
+  :block_types
+doesn't exist on [Class, Game, PhysicsHelpers].
+
+(suggestions above)
+** Backtrace:
+*** app/main.rb:46
+*** app/main.rb:44

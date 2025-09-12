@@ -1,0 +1,40 @@
+# Files from DragonRuby distro
+CHANGELOG.txt
+CHEATSHEET.md
+ctags-emacs
+ctags-vim
+dragon ruby README.md
+dragonruby*exe
+open-source-licenses.txt
+README-raspberrypi.txt
+samples/
+tmp/
+# Files from running DragonRuby
+console_history.txt
+.dragonruby/
+builds/
+exceptions/
+logs/
+mygame/errors/*
+
+# Build results (shared libraries from C extensions)
+mygame/native/
+
+# sprites and other assets we want to ignore (e.g to not share commercial assets in public repos)
+mygame/sprites/ignored/
+
+CHANGELOG-CURR.txt
+CHANGELOG-PREV.txt
+README.txt
+VERSION.txt
+console-logo.png
+docs/
+dragonruby
+dragonruby-bind
+dragonruby-controller.png
+dragonruby-httpd
+dragonruby-publish
+dragonruby.png
+eula.txt
+font.ttf
+include/
