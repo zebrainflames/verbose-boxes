@@ -74,34 +74,23 @@ class Game
   def tick
     handle_input
 
-    unless args.state.paused
-      
-      update
-    end
+    update unless args.state.paused
 
     render
   end
 
   def handle_input
-    if args.inputs.keyboard.key_down.p
-      args.state.paused = !args.state.paused
-    end
+    args.state.paused = !args.state.paused if args.inputs.keyboard.key_down.p
 
-    if args.inputs.keyboard.key_down.escape
-      $gtk.request_quit
-    end
+    $gtk.request_quit if args.inputs.keyboard.key_down.escape
 
     @active_block = nil if args.inputs.keyboard.key_down.space
 
     if @active_block
       args.state.horizontal = args.inputs.left_right
       rot_dir = 0.0
-      if args.inputs.keyboard.key_down.q
-        rot_dir -= 1.0
-      end
-      if args.inputs.keyboard.key_down.e
-        rot_dir += 1.0
-      end
+      rot_dir -= 1.0 if args.inputs.keyboard.key_down.q
+      rot_dir += 1.0 if args.inputs.keyboard.key_down.e
       args.state.rot_dir = rot_dir
     end
   end

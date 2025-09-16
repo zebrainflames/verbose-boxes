@@ -15,35 +15,38 @@
 #include "types.h"
 
 /*
-Why we use drb_api-> wrappers instead of calling mruby C API directly on Windows:
-- The include/ directory ships mruby headers (mruby.h, mruby/*.h) so the code compiles, but
-  these headers don’t provide linkable mruby symbols for your extension DLL.
-- On Linux/macOS, undefined mruby symbols can be resolved at runtime by the host executable
-  (dragonruby), so a shared object may link with unresolved refs. Windows requires all symbols
-  to be resolved at link time for a DLL, which causes linker errors if you call mruby_* directly.
-- DragonRuby exposes a stable function table in include/dragonruby.h (drb_api_t). Extensions are
-  expected to use drb_api->mrb_* wrappers for allocations, arg parsing, ivars, arrays, hashes, etc.
+Why we use drb_api-> wrappers instead of calling mruby C API directly on Windows; on Linux these function calls worked
+directly before, but perhaps there is a difference in shared library linking that causes problems. For now, default to
+accessing the mruby C API via the DragonRuby API struct.
 
-Conclusion: Keep mruby headers for types/macros (mrb_value, mrb_nil_value, mrb_bool_value, DATA_PTR, etc.),
-but call mruby functions through drb_api to ensure the DLL links on Windows.
+Applies to things like `mrb_*_get`, `mrb_get_args` etc. - these are used to define our Ruby API & cross ABI boundary.
+
+TODO: study object linking (differences) on different platforms, together with the mruby C API.
 */
 
 #ifndef M_PI
-#define M_PI 3.14159265358979323846
+#define M_PI 3.14159265358979323846 // ...should be defined in math.h but we just redefine it here to compile...
 #endif
+
+#define RAD2DEG (180.0f / M_PI)
 
 static drb_api_t *drb_api;
 
-// Screen bounds are currently just the DragonRuby defaults
+// Screen bounds are currently just the DragonRuby defaults. We could make this configurable?
 static float g_screen_width = 1280.0f;
 static float g_screen_height = 720.0f;
 
+//config
 static const float PIXELS_PER_METER = 32.0f;
 
+// global game-specific state
 static b2WorldDef mainWorldDef;
 
+// TODO: this should be renamed to b2BodyUserData to start with; then we maintain info there on whether the body
+// collided this frame & other needed info for gameplay
 typedef struct {
 	mrb_value value;
+	//bool collided;
 } mrb_value_holder;
 
 static void b2WorldId_free(mrb_state *mrb, void *p) {
@@ -121,7 +124,8 @@ static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "dynamic") == 0) {
 		//printf("Creating dynamic body\n");
 		type = b2_dynamicBody;
-		bodyDef.linearDamping = 0.0f;
+		bodyDef.linearDamping = 0.1f;
+		bodyDef.angularDamping = 0.1f;
 		bodyDef.enableSleep = allow_sleep;
 	} else if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "kinematic") == 0) {
 		//printf("Creating static body\n");
@@ -146,6 +150,10 @@ static mrb_value body_create_box_shape(mrb_state *mrb, mrb_value self) {
 	mrb_float width, height, density;
 	mrb_bool enable_contacts = false; // Default to false
 	drb_api->mrb_get_args(mrb, "fff|b", &width, &height, &density, &enable_contacts);
+
+    if (enable_contacts) {
+        printf("Creating box with contacts enabled\n");
+    }
 
 	assert(width > 0.0f && "width cannot be zero or negative");
 	assert(height > 0.0f && "height cannot be zero or negative");
@@ -271,7 +279,8 @@ static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
 
 	mrb_float time_step;
-	// TODO: do we need to provide time step here?
+	// TODO: handle timestep better, possibly by getting dt on native code side; now low fps on DR ruby runtime leads to
+	// non-varying timestep, which we should not have with box2d
 	drb_api->mrb_get_args(mrb, "f", &time_step);
 
 	// TODO: what is a good sub step range?
@@ -430,7 +439,7 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 								  drb_api->mrb_float_value(mrb, height_meters * PIXELS_PER_METER));
 
 			drb_api->mrb_ary_push(mrb, result_array, hash);
-		} // TODO: handle other shapes than b2Polygon (which is currently always a box in our case...)
+		} // TODO: handle other shapes than b2Polygon when needed (which is currently always a box in our case...)
 	}
 
 	drb_api->mrb_free(mrb, shapeIds);
