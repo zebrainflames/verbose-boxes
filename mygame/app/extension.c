@@ -12,6 +12,7 @@
 // testing box2d includes:
 #include "box2d.h"
 #include "id.h"
+#include "types.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -373,11 +374,11 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 	// First, get the count of shapes
 	int shapeCount = b2Body_GetShapeCount(*bodyId);
 	if (shapeCount == 0) {
-		return mrb_ary_new(mrb);
+		return mrb_ary_new(mrb); // NOTE: should probably just return nil here!
 	}
 
 	// Allocate memory to hold the shape IDs
-	b2ShapeId *shapeIds = mrb_malloc(mrb, sizeof(b2ShapeId) * shapeCount);
+	b2ShapeId *shapeIds = mrb_malloc(mrb, sizeof(b2ShapeId) * shapeCount); // TODO: remove silly malloc
 	b2Body_GetShapes(*bodyId, shapeIds, shapeCount);
 
 	mrb_value result_array = mrb_ary_new_capa(mrb, shapeCount);
@@ -415,7 +416,7 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 								  drb_api->mrb_float_value(mrb, height_meters * PIXELS_PER_METER));
 
 			mrb_ary_push(mrb, result_array, hash);
-		}
+		} // TODO: handle other shapes than b2Polygon (which is currently always a box in our case...)
 	}
 
 	mrb_free(mrb, shapeIds);
@@ -462,6 +463,39 @@ static mrb_value body_apply_force_center(mrb_state *mrb, mrb_value self) {
 	return mrb_nil_value();
 }
 
+static mrb_value body_apply_impulse_center(mrb_state *mrb, mrb_value self) {
+	b2BodyId* bodyId = DATA_PTR(self);
+
+	mrb_float force_x, force_y;
+	mrb_get_args(mrb, "ff", &force_x, &force_y);
+	b2Vec2 impulse = {force_x / PIXELS_PER_METER, force_y / PIXELS_PER_METER };
+
+	b2Body_ApplyLinearImpulseToCenter(*bodyId, impulse, true);
+	return mrb_nil_value();
+}
+
+static mrb_value body_apply_impulse_for_velocity(mrb_state *mrb, mrb_value self) {
+	b2BodyId* bodyId = DATA_PTR(self);
+
+	mrb_float vel_x, vel_y;
+	mrb_get_args(mrb, "ff", &vel_x, &vel_y);
+
+	b2Vec2 current_vel = b2Body_GetLinearVelocity(*bodyId);
+	float mass = b2Body_GetMass(*bodyId);
+	float dvx = vel_x - current_vel.x;
+	float dvy = vel_y - current_vel.y;
+	b2Vec2 impulse = {0};
+	impulse.x = mass * dvx;
+	impulse.y = mass * dvy;
+
+	b2Body_ApplyLinearImpulseToCenter(*bodyId, impulse, true);
+	return mrb_nil_value();
+}
+
+static mrb_value body_rotate_towards_angle(mrb_state *mrb, mrb_value self) {
+
+}
+
 DRB_FFI_EXPORT
 void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api) {
 	// Boilerplate and module definitions
@@ -489,6 +523,8 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	drb_api->mrb_define_method(state, Body, "angle", body_angle, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "angle=", body_set_rotation, MRB_ARGS_REQ(1));
 	drb_api->mrb_define_method(state, Body, "apply_force_center", body_apply_force_center, MRB_ARGS_REQ(2));
+	drb_api->mrb_define_method(state, Body, "apply_impulse_center", body_apply_impulse_center, MRB_ARGS_REQ(2));
+	drb_api->mrb_define_method(state, Body, "apply_impulse_for_velocity", body_apply_impulse_for_velocity, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "get_info", body_get_info, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "awake?", body_is_awake, MRB_ARGS_NONE());
 }

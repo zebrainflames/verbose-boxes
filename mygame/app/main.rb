@@ -43,8 +43,8 @@ end
 
 class Game
   include PhysicsHelpers
+  attr_accessor :active_block
   attr_reader :args, :block_types
-
   def initialize(args)
     @args = args
     @block_types = [:create_t_block, :create_o_block, :create_l_block, :create_j_block]
@@ -58,6 +58,7 @@ class Game
       'red'    => [255, 153, 153, 120],
       'green'  => [153, 255, 153, 120]
     }
+    @active_block = nil
   end
 
   def setup
@@ -74,8 +75,7 @@ class Game
     handle_input
 
     unless args.state.paused
-      dt = 1.0 / 60.0
-      args.state.world.step(dt)
+      
       update
     end
 
@@ -90,15 +90,42 @@ class Game
     if args.inputs.keyboard.key_down.escape
       $gtk.request_quit
     end
+
+    @active_block = nil if args.inputs.keyboard.key_down.space
+
+    if @active_block
+      args.state.horizontal = args.inputs.left_right
+      rot_dir = 0.0
+      if args.inputs.keyboard.key_down.q
+        rot_dir -= 1.0
+      end
+      if args.inputs.keyboard.key_down.e
+        rot_dir += 1.0
+      end
+      args.state.rot_dir = rot_dir
+    end
   end
 
   def update
-    # Spawn a new random block every 60 ticks (1 second)
-    if (args.state.tick_count % 60) == 0
-      spawn_random_tetrimino
+    # pre-update: apply impulses / control
+    if @active_block
+      # TODO: apply impulses
+      hor = args.state.horizontal * 10.0
+      ver = -2.4 # keep the fall speed smaller than freefall when a block is 'under control'
+      @active_block.body.apply_impulse_for_velocity(hor, ver)
     end
 
-    # Remove off-screen blocks
+    # update Box2D world
+    dt = 1.0 / 60.0
+    args.state.world.step(dt)
+
+    # Testing: spawn a new random block every 60 ticks
+    if (args.state.tick_count % 60) == 0
+      spawn_random_tetrimino
+      @active_block = args.state.blocks.last
+    end
+
+    # post-update
     args.state.blocks.reject! do |block|
       block[:body].position[:y] < -100
     end
@@ -127,7 +154,8 @@ class Game
     labels = []
 
     # Render background image
-    sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: 'sprites/ignored/paper_texture2.jpg' }
+    args.outputs.background_color = [200, 200, 200] 
+    sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: 'sprites/ignored/paper_texture2.jpg', a: 180 }
 
     # Render the ground
     g_pos = args.state.ground.position
@@ -176,7 +204,7 @@ class Game
     end
 
     sleeping_blocks = args.state.blocks.size - args.state.blocks.count { |b| b.body.awake? }
-    labels << {x: 10, y: args.grid.h - 10, r: 20, g: 20, b: 20, text: "FPS: #{args.gtk.current_framerate.round} | Blocks: #{args.state.blocks.count} Sleeping blocks: #{sleeping_blocks}"}
+    labels << {x: 400.from_right, y: args.grid.h - 10, r: 20, g: 20, b: 20, text: "FPS: #{args.gtk.current_framerate.round} | Blocks: #{args.state.blocks.count} Sleeping blocks: #{sleeping_blocks}"}
 
     # putz "Some blocks are frozen on tick #{Kernel.tick_count}" if sleeping_blocks > 0
 
@@ -190,6 +218,7 @@ class Game
 
     if args.state.profile
       args.outputs.primitives << args.gtk.framerate_diagnostics_primitives
+      #args.outputs.debug.watch "render debug data here ..."
     end
   end
 end
