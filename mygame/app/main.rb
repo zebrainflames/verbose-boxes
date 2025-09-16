@@ -160,7 +160,7 @@ class Game
     # Render the ground
     g_pos = args.state.ground.position
     g_ext = args.state.ground.extents
-    sprites << {x: g_pos.x, y: g_pos.y, w: g_ext.w, h: g_ext.h, path: "sprites/square/red.png", anchor_x: 0.5, anchor_y: 0.5}
+    sprites << {x: g_pos.x, y: g_pos.y, w: g_ext.w, h: g_ext.h, path: 'sprites/square/red.png', anchor_x: 0.5, anchor_y: 0.5 }
 
     # Render all composite blocks
     args.state.blocks.each do |block_info|

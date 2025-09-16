@@ -14,6 +14,20 @@
 #include "id.h"
 #include "types.h"
 
+/*
+Why we use drb_api-> wrappers instead of calling mruby C API directly on Windows:
+- The include/ directory ships mruby headers (mruby.h, mruby/*.h) so the code compiles, but
+  these headers don’t provide linkable mruby symbols for your extension DLL.
+- On Linux/macOS, undefined mruby symbols can be resolved at runtime by the host executable
+  (dragonruby), so a shared object may link with unresolved refs. Windows requires all symbols
+  to be resolved at link time for a DLL, which causes linker errors if you call mruby_* directly.
+- DragonRuby exposes a stable function table in include/dragonruby.h (drb_api_t). Extensions are
+  expected to use drb_api->mrb_* wrappers for allocations, arg parsing, ivars, arrays, hashes, etc.
+
+Conclusion: Keep mruby headers for types/macros (mrb_value, mrb_nil_value, mrb_bool_value, DATA_PTR, etc.),
+but call mruby functions through drb_api to ensure the DLL links on Windows.
+*/
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -37,7 +51,7 @@ static void b2WorldId_free(mrb_state *mrb, void *p) {
 	b2WorldId *id = (b2WorldId *)p;
 	b2DestroyWorld(*id);
 	*id = b2_nullWorldId;
-	mrb_free(mrb, p);
+	drb_api->mrb_free(mrb, p);
 }
 
 static const struct mrb_data_type b2WorldId_type = {
@@ -49,10 +63,10 @@ static void b2BodyId_free(mrb_state *mrb, void *p) {
 	b2BodyId *bodyId = (b2BodyId *)p;
 	mrb_value_holder *holder = (mrb_value_holder *)b2Body_GetUserData(*bodyId);
 	if (holder) {
-		mrb_free(mrb, holder);
+		drb_api->mrb_free(mrb, holder);
 	}
 	b2DestroyBody(*(b2BodyId *)p);
-	mrb_free(mrb, p);
+	drb_api->mrb_free(mrb, p);
 }
 
 static const struct mrb_data_type b2BodyId_type = {
@@ -66,7 +80,7 @@ static b2Vec2 meters_to_pixels(float x, float y) { return (b2Vec2){x * PIXELS_PE
 
 static mrb_value world_initialize(mrb_state *mrb, mrb_value self) {
 	mrb_float width, height;
-	mrb_get_args(mrb, "ff", &width, &height);
+	drb_api->mrb_get_args(mrb, "ff", &width, &height);
 	g_screen_width = width;
 	g_screen_height = height;
 
@@ -75,7 +89,7 @@ static mrb_value world_initialize(mrb_state *mrb, mrb_value self) {
 	b2WorldId worldId = b2CreateWorld(&mainWorldDef);
 	b2World_SetGravity(worldId, (b2Vec2){0.0f, -9.8f});
 
-	b2WorldId *worldId_ptr = (b2WorldId *)mrb_malloc(mrb, sizeof(b2WorldId));
+	b2WorldId *worldId_ptr = (b2WorldId *)drb_api->mrb_malloc(mrb, sizeof(b2WorldId));
 	*worldId_ptr = worldId;
 
 	mrb_data_init(self, worldId_ptr, &b2WorldId_type);
@@ -89,7 +103,7 @@ static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	mrb_value type_str;
 	mrb_float x, y;
 	mrb_bool allow_sleep = true;
-	mrb_get_args(mrb, "Sff|b", &type_str, &x, &y, &allow_sleep);
+	drb_api->mrb_get_args(mrb, "Sff|b", &type_str, &x, &y, &allow_sleep);
 
 	struct RClass *module = drb_api->mrb_module_get(mrb, "FFI");
 	module = drb_api->mrb_module_get_under(mrb, module, "Box2D");
@@ -99,17 +113,17 @@ static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	b2BodyDef bodyDef = b2DefaultBodyDef();
 	bodyDef.position = pixels_to_meters(x, y);
 
-	mrb_value_holder *holder = (mrb_value_holder *)mrb_malloc(mrb, sizeof(mrb_value_holder));
+	mrb_value_holder *holder = (mrb_value_holder *)drb_api->mrb_malloc(mrb, sizeof(mrb_value_holder));
 	holder->value = body_obj;
 	bodyDef.userData = holder;
 
 	b2BodyType type = b2_staticBody;
-	if (strcmp(mrb_str_to_cstr(mrb, type_str), "dynamic") == 0) {
+	if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "dynamic") == 0) {
 		//printf("Creating dynamic body\n");
 		type = b2_dynamicBody;
 		bodyDef.linearDamping = 0.0f;
 		bodyDef.enableSleep = allow_sleep;
-	} else if (strcmp(mrb_str_to_cstr(mrb, type_str), "kinematic") == 0) {
+	} else if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "kinematic") == 0) {
 		//printf("Creating static body\n");
 		type = b2_kinematicBody;
 	}
@@ -118,7 +132,7 @@ static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	bodyDef.type = type;
 	b2BodyId bodyId = b2CreateBody(*worldId, &bodyDef);
 
-	b2BodyId *bodyId_ptr = (b2BodyId *)mrb_malloc(mrb, sizeof(b2BodyId));
+	b2BodyId *bodyId_ptr = (b2BodyId *)drb_api->mrb_malloc(mrb, sizeof(b2BodyId));
 	*bodyId_ptr = bodyId;
 
 	mrb_data_init(body_obj, bodyId_ptr, &b2BodyId_type);
@@ -131,7 +145,7 @@ static mrb_value body_create_box_shape(mrb_state *mrb, mrb_value self) {
 
 	mrb_float width, height, density;
 	mrb_bool enable_contacts = false; // Default to false
-	mrb_get_args(mrb, "fff|b", &width, &height, &density, &enable_contacts);
+	drb_api->mrb_get_args(mrb, "fff|b", &width, &height, &density, &enable_contacts);
 
 	assert(width > 0.0f && "width cannot be zero or negative");
 	assert(height > 0.0f && "height cannot be zero or negative");
@@ -174,7 +188,7 @@ static void create_offset_box_fixture(
 static mrb_value body_create_t_shape(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	mrb_float square_size_px, density;
-	mrb_get_args(mrb, "ff", &square_size_px, &density);
+	drb_api->mrb_get_args(mrb, "ff", &square_size_px, &density);
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
@@ -194,7 +208,7 @@ static mrb_value body_create_t_shape(mrb_state *mrb, mrb_value self) {
 static mrb_value body_create_box_shape_2x2(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	mrb_float square_size_px, density;
-	mrb_get_args(mrb, "ff", &square_size_px, &density);
+	drb_api->mrb_get_args(mrb, "ff", &square_size_px, &density);
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
@@ -217,7 +231,7 @@ static mrb_value body_create_box_shape_2x2(mrb_state *mrb, mrb_value self) {
 static mrb_value body_create_l_shape(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	mrb_float square_size_px, density;
-	mrb_get_args(mrb, "ff", &square_size_px, &density);
+	drb_api->mrb_get_args(mrb, "ff", &square_size_px, &density);
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
@@ -239,7 +253,7 @@ static mrb_value body_create_l_shape(mrb_state *mrb, mrb_value self) {
 static mrb_value body_create_j_shape(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	mrb_float square_size_px, density;
-	mrb_get_args(mrb, "ff", &square_size_px, &density);
+	drb_api->mrb_get_args(mrb, "ff", &square_size_px, &density);
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
@@ -258,7 +272,7 @@ static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 
 	mrb_float time_step;
 	// TODO: do we need to provide time step here?
-	mrb_get_args(mrb, "f", &time_step);
+	drb_api->mrb_get_args(mrb, "f", &time_step);
 
 	// TODO: what is a good sub step range?
 	b2World_Step(*worldId, time_step, 8);
@@ -276,21 +290,21 @@ static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 			mrb_value ruby_body_a = holderA->value;
 			mrb_value ruby_body_b = holderB->value;
 
-			mrb_value contacts_a = mrb_iv_get(mrb, ruby_body_a, mrb_intern_lit(mrb, "@contacts"));
+			mrb_value contacts_a = drb_api->mrb_iv_get(mrb, ruby_body_a, drb_api->mrb_intern_lit(mrb, "@contacts"));
 			if (mrb_nil_p(contacts_a)) {
-				contacts_a = mrb_ary_new(mrb);
-				mrb_iv_set(mrb, ruby_body_a, mrb_intern_lit(mrb, "@contacts"), contacts_a);
+				contacts_a = drb_api->mrb_ary_new(mrb);
+				drb_api->mrb_iv_set(mrb, ruby_body_a, drb_api->mrb_intern_lit(mrb, "@contacts"), contacts_a);
 			}
-			mrb_value b_id = mrb_funcall(mrb, ruby_body_b, "object_id", 0);
-			mrb_ary_push(mrb, contacts_a, b_id);
+			mrb_value b_id = drb_api->mrb_funcall(mrb, ruby_body_b, "object_id", 0);
+			drb_api->mrb_ary_push(mrb, contacts_a, b_id);
 
-			mrb_value contacts_b = mrb_iv_get(mrb, ruby_body_b, mrb_intern_lit(mrb, "@contacts"));
+			mrb_value contacts_b = drb_api->mrb_iv_get(mrb, ruby_body_b, drb_api->mrb_intern_lit(mrb, "@contacts"));
 			if (mrb_nil_p(contacts_b)) {
-				contacts_b = mrb_ary_new(mrb);
-				mrb_iv_set(mrb, ruby_body_b, mrb_intern_lit(mrb, "@contacts"), contacts_b);
+				contacts_b = drb_api->mrb_ary_new(mrb);
+				drb_api->mrb_iv_set(mrb, ruby_body_b, drb_api->mrb_intern_lit(mrb, "@contacts"), contacts_b);
 			}
-			mrb_value a_id = mrb_funcall(mrb, ruby_body_a, "object_id", 0);
-			mrb_ary_push(mrb, contacts_b, a_id);
+			mrb_value a_id = drb_api->mrb_funcall(mrb, ruby_body_a, "object_id", 0);
+			drb_api->mrb_ary_push(mrb, contacts_b, a_id);
 		}
 	}
 
@@ -374,14 +388,14 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 	// First, get the count of shapes
 	int shapeCount = b2Body_GetShapeCount(*bodyId);
 	if (shapeCount == 0) {
-		return mrb_ary_new(mrb); // NOTE: should probably just return nil here!
+ 	return drb_api->mrb_ary_new(mrb); // NOTE: should probably just return nil here!
 	}
 
 	// Allocate memory to hold the shape IDs
-	b2ShapeId *shapeIds = mrb_malloc(mrb, sizeof(b2ShapeId) * shapeCount); // TODO: remove silly malloc
+	b2ShapeId *shapeIds = drb_api->mrb_malloc(mrb, sizeof(b2ShapeId) * shapeCount); // TODO: remove silly malloc
 	b2Body_GetShapes(*bodyId, shapeIds, shapeCount);
 
-	mrb_value result_array = mrb_ary_new_capa(mrb, shapeCount);
+	mrb_value result_array = drb_api->mrb_ary_new_capa(mrb, shapeCount);
 
 	for (int i = 0; i < shapeCount; i++) {
 		b2ShapeId shapeId = shapeIds[i];
@@ -405,7 +419,7 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 			float width_meters = max_v.x - min_v.x;
 			float height_meters = max_v.y - min_v.y;
 
-			mrb_value hash = mrb_hash_new(mrb);
+  	mrb_value hash = drb_api->mrb_hash_new(mrb);
 			drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "x")),
 								  drb_api->mrb_float_value(mrb, center_meters.x * PIXELS_PER_METER));
 			drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "y")),
@@ -415,11 +429,11 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 			drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "h")),
 								  drb_api->mrb_float_value(mrb, height_meters * PIXELS_PER_METER));
 
-			mrb_ary_push(mrb, result_array, hash);
+			drb_api->mrb_ary_push(mrb, result_array, hash);
 		} // TODO: handle other shapes than b2Polygon (which is currently always a box in our case...)
 	}
 
-	mrb_free(mrb, shapeIds);
+	drb_api->mrb_free(mrb, shapeIds);
 	return result_array;
 }
 
@@ -435,7 +449,7 @@ static mrb_value body_angle(mrb_state *mrb, mrb_value self) {
 static mrb_value body_set_rotation(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	mrb_float angle_degrees;
-	mrb_get_args(mrb, "f", &angle_degrees);
+	drb_api->mrb_get_args(mrb, "f", &angle_degrees);
 
 	float angle_radians = angle_degrees * (M_PI / 180.0f);
 	b2Vec2 position = b2Body_GetPosition(*bodyId);
@@ -454,7 +468,7 @@ static mrb_value body_apply_force_center(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 
 	mrb_float force_x, force_y;
-	mrb_get_args(mrb, "ff", &force_x, &force_y);
+	drb_api->mrb_get_args(mrb, "ff", &force_x, &force_y);
 
 	b2Vec2 force = {force_x / PIXELS_PER_METER, force_y / PIXELS_PER_METER};
 
@@ -467,7 +481,7 @@ static mrb_value body_apply_impulse_center(mrb_state *mrb, mrb_value self) {
 	b2BodyId* bodyId = DATA_PTR(self);
 
 	mrb_float force_x, force_y;
-	mrb_get_args(mrb, "ff", &force_x, &force_y);
+	drb_api->mrb_get_args(mrb, "ff", &force_x, &force_y);
 	b2Vec2 impulse = {force_x / PIXELS_PER_METER, force_y / PIXELS_PER_METER };
 
 	b2Body_ApplyLinearImpulseToCenter(*bodyId, impulse, true);
@@ -478,7 +492,7 @@ static mrb_value body_apply_impulse_for_velocity(mrb_state *mrb, mrb_value self)
 	b2BodyId* bodyId = DATA_PTR(self);
 
 	mrb_float vel_x, vel_y;
-	mrb_get_args(mrb, "ff", &vel_x, &vel_y);
+	drb_api->mrb_get_args(mrb, "ff", &vel_x, &vel_y);
 
 	b2Vec2 current_vel = b2Body_GetLinearVelocity(*bodyId);
 	float mass = b2Body_GetMass(*bodyId);
@@ -493,7 +507,8 @@ static mrb_value body_apply_impulse_for_velocity(mrb_state *mrb, mrb_value self)
 }
 
 static mrb_value body_rotate_towards_angle(mrb_state *mrb, mrb_value self) {
-
+	// TODO: implement rotation towards a given angle; for now, no-op.
+	return mrb_nil_value();
 }
 
 DRB_FFI_EXPORT
