@@ -1,3 +1,6 @@
 [submodule "mygame/lib/box2d"]
 	path = mygame/lib/box2d
 	url = https://github.com/erincatto/box2d.git
+[submodule "dr-types"]
+	path = dr-types
+	url = https://github.com/FylmTM/dr-types.git
