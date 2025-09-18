@@ -51,24 +51,68 @@ class Game
     @colors = ['violet', 'orange', 'blue', 'green'] # 'yellow', 'red'
     @pastel_colors = {
       # r, g, b, a
-      'violet' => [200, 160, 220, 120],
-      'yellow' => [253, 253, 150, 120],
-      'orange' => [255, 204, 153, 120],
-      'blue'   => [173, 216, 230, 120],
-      'red'    => [255, 153, 153, 120],
-      'green'  => [153, 255, 153, 120]
+      'violet' => [200, 160, 220],
+      'yellow' => [253, 253, 150],
+      'orange' => [255, 204, 153],
+      'blue'   => [173, 216, 230],
+      'red'    => [255, 153, 153],
+      'green'  => [153, 255, 153]
     }
     @active_block = nil
   end
 
   def setup
     args.state.world = FFI::Box2D::World.new(args.grid.w, args.grid.h)
-    args.state.ground = create_static_box(args, args.grid.w / 2, 50, 1280, 10)
+    
+    # Create terrain
+    terrain_points = [
+      { x: 1280, y: 180 },
+      { x: 1000, y: 200 },
+      { x: 800, y: 160 },
+      { x: 600, y: 180 },
+      { x: 400, y: 120 },
+      { x: 200, y: 150 },
+      { x: 0, y: 100 }
+    ]
+    
+    args.state.ground = create_body(args, "static", 0, 0)
+    args.state.ground.create_chain_shape(terrain_points, false)
+
     args.state.blocks ||= []
     args.state.paused = false
 
+
+    # rendering setup; RTs etc.
+    args.render_target(:static_elements).w = args.grid.w
+    args.render_target(:static_elements).h = args.grid.h
+    args.render_target(:static_elements).background_color = [0, 0, 0, 0]
+    args.render_target(:static_elements).sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: 'sprites/ignored/paper_texture2.jpg', a: 180 }
+    ground_shapes = args.state.ground.get_shapes_info
+    ground_shapes.each do |shape|
+      p1 = { x: shape[:x1], y: shape[:y1] }
+      p2 = { x: shape[:x2], y: shape[:y2] }
+
+      angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * (180 / Math::PI)
+      length = Math.sqrt((p2.x - p1.x)**2 + (p2.y - p1.y)**2)
+
+      mx = (p1.x + p2.x) / 2.0
+      my = (p1.y + p2.y) / 2.0
+
+      args.render_target(:static_elements).sprites << {
+        x: mx,
+        y: my,
+        w: length,
+        h: 12, # Height of the texture
+        path: 'sprites/line_test.png',
+        angle: angle,
+        anchor_x: 0.5,
+        anchor_y: 0.5,
+        a: 220
+      }
+    end
+
     # TODO: flag these options somehow
-    args.state.profile ||= true
+    args.state.profile ||= false
   end
 
   def tick
@@ -88,33 +132,40 @@ class Game
 
     if @active_block
       args.state.horizontal = args.inputs.left_right
-      rot_dir = 0.0
-      rot_dir -= 1.0 if args.inputs.keyboard.key_down.q
-      rot_dir += 1.0 if args.inputs.keyboard.key_down.e
+      rot_dir = if args.inputs.keyboard.key_down.q
+                  -1.0
+                elsif args.inputs.keyboard.key_down.e
+                  1.0
+                else
+                  0.0
+                end
       args.state.rot_dir = rot_dir
     end
   end
 
   def update
-    # pre-update: apply impulses / control
+    # pre-update: apply impulses / control and update active tetrimino state
     if @active_block
-      # TODO: apply impulses
       hor = args.state.horizontal * 10.0
       ver = -2.4 # keep the fall speed smaller than freefall when a block is 'under control'
       @active_block.body.apply_impulse_for_velocity(hor, ver)
+
+      # TODO: rotate active block per input
+
+      if @active_block.body.contacts.size > 0
+        @active_block = nil
+      end
     end
 
     # update Box2D world
-    dt = 1.0 / 60.0
-    args.state.world.step(dt)
+    args.state.world.step
 
-    # Testing: spawn a new random block every 60 ticks
-    if (args.state.tick_count % 60) == 0
+    if (args.state.tick_count % 60) == 0 && @active_block.nil?
       spawn_random_tetrimino
       @active_block = args.state.blocks.last
     end
 
-    # post-update
+    # post-update cleanup
     args.state.blocks.reject! do |block|
       block[:body].position[:y] < -100
     end
@@ -127,10 +178,8 @@ class Game
     spawn_x = args.grid.w / 2 + (rand(100) - 50)
     spawn_y = args.grid.h - 100
 
-    # Create the block, disabling sleep to prevent mid-air freezing
     new_block = send(block_type, args, spawn_x, spawn_y, allow_sleep: true)
 
-    # Set a random rotation
     random_angle = [0, 90, 180, 270].sample
     new_block.angle = random_angle
 
@@ -142,16 +191,11 @@ class Game
     sprites = []
     labels = []
 
-    # Render background image
-    args.outputs.background_color = [200, 200, 200] 
-    sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: 'sprites/ignored/paper_texture2.jpg', a: 180 }
+    # render the pre-baked background, ground and other baked render targets / static elements
+    sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :static_elements }
 
-    # Render the ground
-    g_pos = args.state.ground.position
-    g_ext = args.state.ground.extents
-    sprites << {x: g_pos.x, y: g_pos.y, w: g_ext.w, h: g_ext.h, path: 'sprites/square/red.png', anchor_x: 0.5, anchor_y: 0.5 }
-
-    # Render all composite blocks
+    # Render all the physical blocks
+    # NOTE: this is quite heavy atm and could do with a bunch of optimization
     args.state.blocks.each do |block_info|
       body = block_info[:body]
       color_name = block_info[:color]
@@ -180,11 +224,11 @@ class Game
           y: final_y,
           w: shape[:w] + extra_size_px,
           h: shape[:h] + extra_size_px,
-          path: 'sprites/ignored/tile.png',
+          path: 'sprites/tile_crumpled1.png',
           r: tint[0],
           g: tint[1],
           b: tint[2],
-          a: tint[3],
+          a: 255, # tint[3]
           anchor_x: 0.5,
           anchor_y: 0.5,
           angle: body_angle_degrees
@@ -193,9 +237,9 @@ class Game
     end
 
     sleeping_blocks = args.state.blocks.size - args.state.blocks.count { |b| b.body.awake? }
-    labels << {x: 400.from_right, y: args.grid.h - 10, r: 20, g: 20, b: 20, text: "FPS: #{args.gtk.current_framerate.round} | Blocks: #{args.state.blocks.count} Sleeping blocks: #{sleeping_blocks}"}
+    labels << {alignment_enum: 1, font: "fonts/dirty_harold/dirty_harold.ttf", x: args.grid.w / 2.0, y: args.grid.h - 10, r: 20, g: 20, b: 20, text: "FPS: #{args.gtk.current_framerate.round} | Blocks: #{args.state.blocks.count} Sleeping blocks: #{sleeping_blocks}"}
 
-    # putz "Some blocks are frozen on tick #{Kernel.tick_count}" if sleeping_blocks > 0
+    labels << {alignment_enum: 1, x: args.grid.w / 2.0, y: 40.from_top, r: 20, g: 20, b: 20, text: "Active block contacts: #{@active_block.body.contacts}"} if @active_block
 
     if args.state.paused
       sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :pixel, r: 0, g: 0, b: 0, a: 150 }
@@ -212,16 +256,14 @@ class Game
   end
 end
 
-# Main tick loop
 def tick(args)
-  # One-time setup
   unless args.state.game
     GTK.ffi_misc.gtk_dlopen("ext")
     $game = Game.new(args)
+    args.state = {}
     args.state.game = $game
     $game.setup
   end
 
-  # Calling game logic
   args.state.game.tick
 end

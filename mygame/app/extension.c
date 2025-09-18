@@ -1,5 +1,6 @@
 #include "math_functions.h"
 #include "mruby.h"
+#include "mruby/boxing_word.h"
 #include "mruby/value.h"
 #include <assert.h>
 #include <dragonruby.h>
@@ -37,17 +38,19 @@ static float g_screen_width = 1280.0f;
 static float g_screen_height = 720.0f;
 
 //config
-static const float PIXELS_PER_METER = 32.0f;
+static const float PIXELS_PER_METER = 32.0f; // NOTE: this still needs some tuning. We might want to bring the average energy level down in individual box2d simulation islands
 
-// global game-specific state
+// global game-specific physics state
 static b2WorldDef mainWorldDef;
+static Uint32 current_tick = 0;
+static Uint32 prev_tick = 0;
 
-// TODO: this should be renamed to b2BodyUserData to start with; then we maintain info there on whether the body
-// collided this frame & other needed info for gameplay
+// body_user_context provides the tetrimino block -specific gameplay related data, esp. to the ruby side of our codebase -- such as info on whether this block
+// collided this frame, that can be used for gameplay logic
 typedef struct {
-	mrb_value value;
-	//bool collided;
-} mrb_value_holder;
+	mrb_value body_obj;
+	bool collided;
+} body_user_context;
 
 static void b2WorldId_free(mrb_state *mrb, void *p) {
 	printf("[CExt] -- INFO: freeing Box2D world");
@@ -64,9 +67,9 @@ static const struct mrb_data_type b2WorldId_type = {
 
 static void b2BodyId_free(mrb_state *mrb, void *p) {
 	b2BodyId *bodyId = (b2BodyId *)p;
-	mrb_value_holder *holder = (mrb_value_holder *)b2Body_GetUserData(*bodyId);
-	if (holder) {
-		drb_api->mrb_free(mrb, holder);
+	body_user_context *buc = (body_user_context*)b2Body_GetUserData(*bodyId);
+	if (buc) {
+		drb_api->mrb_free(mrb, buc);
 	}
 	b2DestroyBody(*(b2BodyId *)p);
 	drb_api->mrb_free(mrb, p);
@@ -113,22 +116,22 @@ static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	struct RClass *body_class = drb_api->mrb_class_get_under(mrb, module, "Body");
 	mrb_value body_obj = drb_api->mrb_obj_new(mrb, body_class, 0, NULL);
 
+	drb_api->mrb_iv_set(mrb, body_obj, drb_api->mrb_intern_lit(mrb, "@contacts"), drb_api->mrb_ary_new(mrb));
+
 	b2BodyDef bodyDef = b2DefaultBodyDef();
 	bodyDef.position = pixels_to_meters(x, y);
 
-	mrb_value_holder *holder = (mrb_value_holder *)drb_api->mrb_malloc(mrb, sizeof(mrb_value_holder));
-	holder->value = body_obj;
+	body_user_context *holder = (body_user_context*)drb_api->mrb_malloc(mrb, sizeof(body_user_context));
+	holder->body_obj = body_obj;
 	bodyDef.userData = holder;
 
 	b2BodyType type = b2_staticBody;
 	if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "dynamic") == 0) {
-		//printf("Creating dynamic body\n");
 		type = b2_dynamicBody;
-		bodyDef.linearDamping = 0.1f;
+		bodyDef.linearDamping = 0.5f;
 		bodyDef.angularDamping = 0.1f;
 		bodyDef.enableSleep = allow_sleep;
 	} else if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "kinematic") == 0) {
-		//printf("Creating static body\n");
 		type = b2_kinematicBody;
 	}
 
@@ -151,10 +154,6 @@ static mrb_value body_create_box_shape(mrb_state *mrb, mrb_value self) {
 	mrb_bool enable_contacts = false; // Default to false
 	drb_api->mrb_get_args(mrb, "fff|b", &width, &height, &density, &enable_contacts);
 
-    if (enable_contacts) {
-        printf("Creating box with contacts enabled\n");
-    }
-
 	assert(width > 0.0f && "width cannot be zero or negative");
 	assert(height > 0.0f && "height cannot be zero or negative");
 
@@ -170,11 +169,7 @@ static mrb_value body_create_box_shape(mrb_state *mrb, mrb_value self) {
 
 // Helper function to create an offset polygon for a box using b2MakeBox and translation
 // This is used to easily create the tetriminos
-static void create_offset_box_fixture(
-	b2BodyId bodyId, 
-	const b2ShapeDef *shapeDef, 
-	float box_width_px, float box_height_px,
-	float offset_x_px, float offset_y_px) {
+static void create_offset_box_fixture(b2BodyId bodyId, const b2ShapeDef *shapeDef, float box_width_px, float box_height_px, float offset_x_px, float offset_y_px) {
 	float hw_m = (box_width_px / PIXELS_PER_METER) / 2.0f;
 	float hh_m = (box_height_px / PIXELS_PER_METER) / 2.0f;
 	float offset_x_m = offset_x_px / PIXELS_PER_METER;
@@ -200,7 +195,7 @@ static mrb_value body_create_t_shape(mrb_state *mrb, mrb_value self) {
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
-	shapeDef.enableContactEvents = false;
+	shapeDef.enableContactEvents = true;
 
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -square_size_px, 0);
@@ -220,7 +215,7 @@ static mrb_value body_create_box_shape_2x2(mrb_state *mrb, mrb_value self) {
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
-	shapeDef.enableContactEvents = false;
+	shapeDef.enableContactEvents = true;
 
 	
 	float s_half = square_size_px / 2.0f;
@@ -243,7 +238,7 @@ static mrb_value body_create_l_shape(mrb_state *mrb, mrb_value self) {
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
-	shapeDef.enableContactEvents = false;
+	shapeDef.enableContactEvents = true;
 
 	
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
@@ -265,7 +260,7 @@ static mrb_value body_create_j_shape(mrb_state *mrb, mrb_value self) {
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
-	shapeDef.enableContactEvents = false;
+	shapeDef.enableContactEvents = true;
 
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -square_size_px, 0);
@@ -275,16 +270,62 @@ static mrb_value body_create_j_shape(mrb_state *mrb, mrb_value self) {
 	return mrb_nil_value();
 }
 
+static mrb_value body_create_chain_shape(mrb_state *mrb, mrb_value self) {
+    b2BodyId* bodyId = DATA_PTR(self);
+
+    mrb_value points_array;
+    mrb_bool loop;
+
+    drb_api->mrb_get_args(mrb, "A!b", &points_array, &loop);
+
+    int num_points = RARRAY_LEN(points_array);
+    if (num_points < 2) {
+        // A chain needs at least 2 points
+        return mrb_nil_value();
+    }
+
+    b2Vec2* points = drb_api->mrb_malloc(mrb, sizeof(b2Vec2) * num_points);
+    for (int i = 0; i < num_points; i++) {
+        mrb_value point_hash = drb_api->mrb_ary_entry(points_array, i);
+        mrb_value x_val = drb_api->mrb_hash_get(mrb, point_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")));
+        mrb_value y_val = drb_api->mrb_hash_get(mrb, point_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")));
+
+        float x = drb_api->mrb_to_flo(mrb, x_val);
+        float y = drb_api->mrb_to_flo(mrb, y_val);
+
+        points[i] = pixels_to_meters(x, y);
+    }
+
+    b2ChainDef chainDef = b2DefaultChainDef();
+    chainDef.points = points;
+    chainDef.count = num_points;
+    chainDef.isLoop = loop;
+
+    b2CreateChain(*bodyId, &chainDef);
+
+    drb_api->mrb_free(mrb, points);
+
+    return mrb_nil_value();
+}
+
+#define MAX_DELTA 0.032f
+
+static float get_delta_time() {
+	Uint32 ticks = drb_api->SDL_GetTicks();
+	current_tick = ticks;
+	float dt = (float)(current_tick - prev_tick) / 1000.0f;
+	// tad hacky, but sometimes the simulation gets called with a very long pause in ticks (in Box2D side) - to avoid
+	// and unstable simulation (== wildly flying pieces) we constrain the delta time to some sane limit that needs tuning
+	if (dt > MAX_DELTA) dt = MAX_DELTA;
+	prev_tick = current_tick;
+	return dt;
+}
+
 static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
-
-	mrb_float time_step;
-	// TODO: handle timestep better, possibly by getting dt on native code side; now low fps on DR ruby runtime leads to
-	// non-varying timestep, which we should not have with box2d
-	drb_api->mrb_get_args(mrb, "f", &time_step);
-
-	// TODO: what is a good sub step range?
-	b2World_Step(*worldId, time_step, 8);
+	
+	float dt = get_delta_time();
+	b2World_Step(*worldId, dt, 8);
 
 	b2ContactEvents events = b2World_GetContactEvents(*worldId);
 	for (int i = 0; i < events.beginCount; ++i) {
@@ -292,12 +333,12 @@ static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 		b2BodyId bodyIdA = b2Shape_GetBody(event.shapeIdA);
 		b2BodyId bodyIdB = b2Shape_GetBody(event.shapeIdB);
 
-		mrb_value_holder *holderA = (mrb_value_holder *)b2Body_GetUserData(bodyIdA);
-		mrb_value_holder *holderB = (mrb_value_holder *)b2Body_GetUserData(bodyIdB);
+		body_user_context *holderA = (body_user_context*)b2Body_GetUserData(bodyIdA);
+		body_user_context *holderB = (body_user_context*)b2Body_GetUserData(bodyIdB);
 
 		if (holderA && holderB) {
-			mrb_value ruby_body_a = holderA->value;
-			mrb_value ruby_body_b = holderB->value;
+			mrb_value ruby_body_a = holderA->body_obj;
+			mrb_value ruby_body_b = holderB->body_obj;
 
 			mrb_value contacts_a = drb_api->mrb_iv_get(mrb, ruby_body_a, drb_api->mrb_intern_lit(mrb, "@contacts"));
 			if (mrb_nil_p(contacts_a)) {
@@ -401,7 +442,7 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 	}
 
 	// Allocate memory to hold the shape IDs
-	b2ShapeId *shapeIds = drb_api->mrb_malloc(mrb, sizeof(b2ShapeId) * shapeCount); // TODO: remove silly malloc
+	b2ShapeId *shapeIds = drb_api->mrb_malloc(mrb, sizeof(b2ShapeId) * shapeCount);
 	b2Body_GetShapes(*bodyId, shapeIds, shapeCount);
 
 	mrb_value result_array = drb_api->mrb_ary_new_capa(mrb, shapeCount);
@@ -439,7 +480,23 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 								  drb_api->mrb_float_value(mrb, height_meters * PIXELS_PER_METER));
 
 			drb_api->mrb_ary_push(mrb, result_array, hash);
-		} // TODO: handle other shapes than b2Polygon when needed (which is currently always a box in our case...)
+		} else if (b2Shape_GetType(shapeId) == b2_chainSegmentShape) {
+            b2ChainSegment segment = b2Shape_GetChainSegment(shapeId);
+            b2Vec2 p1 = meters_to_pixels(segment.segment.point1.x, segment.segment.point1.y);
+            b2Vec2 p2 = meters_to_pixels(segment.segment.point2.x, segment.segment.point2.y);
+
+            mrb_value hash = drb_api->mrb_hash_new(mrb);
+            drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "x1")),
+                                  drb_api->mrb_float_value(mrb, p1.x));
+            drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "y1")),
+                                  drb_api->mrb_float_value(mrb, p1.y));
+            drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "x2")),
+                                  drb_api->mrb_float_value(mrb, p2.x));
+            drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "y2")),
+                                  drb_api->mrb_float_value(mrb, p2.y));
+
+            drb_api->mrb_ary_push(mrb, result_array, hash);
+        }
 	}
 
 	drb_api->mrb_free(mrb, shapeIds);
@@ -520,6 +577,10 @@ static mrb_value body_rotate_towards_angle(mrb_state *mrb, mrb_value self) {
 	return mrb_nil_value();
 }
 
+static mrb_value body_get_contacts(mrb_state *mrb, mrb_value self) {
+	return drb_api->mrb_iv_get(mrb, self, drb_api->mrb_intern_lit(mrb, "@contacts"));
+}
+
 DRB_FFI_EXPORT
 void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api) {
 	// Boilerplate and module definitions
@@ -531,7 +592,7 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	struct RClass *World = drb_api->mrb_define_class_under(state, module, "World", base);
 	drb_api->mrb_define_method(state, World, "initialize", world_initialize, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, World, "create_body", world_create_body, MRB_ARGS_ARG(3, 1));
-	drb_api->mrb_define_method(state, World, "step", world_step, MRB_ARGS_REQ(1));
+	drb_api->mrb_define_method(state, World, "step", world_step, MRB_ARGS_NONE());
 
 	// Body Ruby class definition
 	struct RClass *Body = drb_api->mrb_define_class_under(state, module, "Body", base);
@@ -540,6 +601,7 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	drb_api->mrb_define_method(state, Body, "create_box_shape_2x2", body_create_box_shape_2x2, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "create_l_shape", body_create_l_shape, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "create_j_shape", body_create_j_shape, MRB_ARGS_REQ(2));
+	drb_api->mrb_define_method(state, Body, "create_chain_shape", body_create_chain_shape, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "position", body_position, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "position_meters", body_position_meters, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "extents", body_extents, MRB_ARGS_NONE());
@@ -551,4 +613,5 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	drb_api->mrb_define_method(state, Body, "apply_impulse_for_velocity", body_apply_impulse_for_velocity, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "get_info", body_get_info, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "awake?", body_is_awake, MRB_ARGS_NONE());
+	drb_api->mrb_define_method(state, Body, "contacts", body_get_contacts,MRB_ARGS_NONE());
 }
