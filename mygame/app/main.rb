@@ -4,6 +4,12 @@ module PhysicsHelpers
     args.state.world.create_body(type, x, y, allow_sleep)
   end
 
+  def create_sensor_box(args, x, y, w, h)
+    body = create_body(args, "static", x, y, allow_sleep: false)
+    body.create_sensor_box(w, h)
+    body
+  end
+
   def create_dynamic_box(args, x, y, w, h, density: 1.0, contacts: false, allow_sleep: true)
     body = create_body(args, "dynamic", x, y, allow_sleep: allow_sleep)
     body.create_box_shape(w, h, density, contacts)
@@ -59,10 +65,11 @@ class Game
       'green'  => [153, 255, 153]
     }
     @active_block = nil
+    @all_shapes_hit = []
   end
 
   def setup
-    args.state.world = FFI::Box2D::World.new(args.grid.w, args.grid.h)
+    args.state.world = FFI::Box2D::World.new
     
     # Create terrain
     terrain_points = [
@@ -128,14 +135,17 @@ class Game
 
     $gtk.request_quit if args.inputs.keyboard.key_down.escape
 
-    @active_block = nil if args.inputs.keyboard.key_down.space
-
     if @active_block
-      args.state.horizontal = args.inputs.left_right
-      rot_dir = if args.inputs.keyboard.key_down.q
-                  -1.0
-                elsif args.inputs.keyboard.key_down.e
+      args.state.horizontal = args.inputs.left_right * 5.0
+      args.state.vertical = if args.inputs.up_down < 0.0
+                              -10.0
+                            else
+                              -2.4
+                            end
+      rot_dir = if args.inputs.keyboard.key_down_or_held? "q"
                   1.0
+                elsif args.inputs.keyboard.key_down_or_held? "e"
+                  -1.0
                 else
                   0.0
                 end
@@ -146,14 +156,19 @@ class Game
   def update
     # pre-update: apply impulses / control and update active tetrimino state
     if @active_block
-      hor = args.state.horizontal * 10.0
-      ver = -2.4 # keep the fall speed smaller than freefall when a block is 'under control'
-      @active_block.body.apply_impulse_for_velocity(hor, ver)
-
-      # TODO: rotate active block per input
-
-      if @active_block.body.contacts.size > 0
+      if @active_block.body.collided?
+        # TODO: less magicy numbers, but on  last frame we want to remove horizontal movement...
+        @active_block.body.apply_impulse_for_velocity(0.0, -2.4)
         @active_block = nil
+      else
+        hor = args.state.horizontal
+        ver = args.state.vertical
+        @active_block.body.apply_impulse_for_velocity(hor, ver)
+
+        # TODO: rotate active block per input
+        #unless args.state.rot_dir.zero?
+          @active_block.body.rotate(50 * args.state.rot_dir)
+        #end
       end
     end
 
@@ -165,9 +180,32 @@ class Game
       @active_block = args.state.blocks.last
     end
 
+    check_for_cleared_lines
+
     # post-update cleanup
     args.state.blocks.reject! do |block|
-      block[:body].position[:y] < -100
+      block[:body].position[:y] < -100 || block[:body].get_shapes_info.empty?
+    end
+  end
+
+  def check_for_cleared_lines
+    scan_area = { x: 200, y: 100, w: 880, h: 400 }
+    num_rays = 20
+    min_hits = 6
+    vertical_tolerance = 8.0 # TODO: less magic numbers, use block size or something
+    horiztonal_tolerance = 1.2 * 32.0
+
+    @raycast_y_coords = []
+    @all_shapes_hit = []
+
+    num_rays.times do |i|
+      ray_y = scan_area.y + (scan_area.h / num_rays) * i
+      @raycast_y_coords << ray_y
+      ray_start_x = scan_area.x
+      ray_end_x = scan_area.x + scan_area.w
+
+      shapes_hit = args.state.world.raycast(ray_start_x, ray_y, ray_end_x, ray_y, min_hits, vertical_tolerance, horiztonal_tolerance)
+      @all_shapes_hit.concat(shapes_hit)
     end
   end
 
@@ -178,7 +216,7 @@ class Game
     spawn_x = args.grid.w / 2 + (rand(100) - 50)
     spawn_y = args.grid.h - 100
 
-    new_block = send(block_type, args, spawn_x, spawn_y, allow_sleep: true)
+    new_block = send(block_type, args, spawn_x, spawn_y, square_size: 32, allow_sleep: true)
 
     random_angle = [0, 90, 180, 270].sample
     new_block.angle = random_angle
@@ -217,7 +255,6 @@ class Game
         final_x = body_pos[:x] + rotated_rel_x
         final_y = body_pos[:y] + rotated_rel_y
 
-
         extra_size_px = 2 # we add a tiny bit of extra width and height to the blocks, as the texture has some alpha around the borders
         sprites << {
           x: final_x,
@@ -236,14 +273,28 @@ class Game
       end
     end
 
+    ### Raycast tests:
+    @raycast_y_coords.each do |ray_y|
+      args.outputs.lines << {
+        x: 200, y: ray_y,
+        x2: 200 + 880, y2: ray_y,
+        r: 255, g: 100, b: 100, a: 100
+      }
+    end
+
+    @all_shapes_hit.each do |s|
+        sprites << { x: s.x, y: s.y, w: 12, h: 12, path: :pixel, r:153, g:255, b:153, a:255, anchor_x: 0.5, anchor_y: 0.5 }
+    end
+    ### 
+
     sleeping_blocks = args.state.blocks.size - args.state.blocks.count { |b| b.body.awake? }
     labels << {alignment_enum: 1, font: "fonts/dirty_harold/dirty_harold.ttf", x: args.grid.w / 2.0, y: args.grid.h - 10, r: 20, g: 20, b: 20, text: "FPS: #{args.gtk.current_framerate.round} | Blocks: #{args.state.blocks.count} Sleeping blocks: #{sleeping_blocks}"}
 
-    labels << {alignment_enum: 1, x: args.grid.w / 2.0, y: 40.from_top, r: 20, g: 20, b: 20, text: "Active block contacts: #{@active_block.body.contacts}"} if @active_block
+    labels << {alignment_enum: 1, font: "fonts/dirty_harold/dirty_harold.ttf", x: args.grid.w / 2.0, y: 40.from_top, r: 20, g: 20, b: 20, text: "Active block collided: #{@active_block.body.collided?}"} if @active_block
 
     if args.state.paused
       sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :pixel, r: 0, g: 0, b: 0, a: 150 }
-      labels << { x: args.grid.center_x, y: args.grid.center_y, text: "Paused", size_enum: 10, alignment_enum: 1, r: 255, g: 255, b: 255 }
+      labels << { x: args.grid.center_x, y: args.grid.center_y, text: "Paused", size_enum: 10, alignment_enum: 1, r: 255, g: 255, b: 255, font: "fonts/dirty_harold/dirty_harold.ttf" }
     end
 
     args.outputs.sprites << sprites
@@ -260,10 +311,13 @@ def tick(args)
   unless args.state.game
     GTK.ffi_misc.gtk_dlopen("ext")
     $game = Game.new(args)
-    args.state = {}
     args.state.game = $game
     $game.setup
   end
 
   args.state.game.tick
+end
+
+def boot(args)
+  args.state = {}
 end

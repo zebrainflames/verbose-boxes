@@ -30,25 +30,49 @@ TODO: study object linking (differences) on different platforms, together with t
 #endif
 
 #define RAD2DEG (180.0f / M_PI)
+#define DEGTORAD (M_PI / 180.0f)
 
 static drb_api_t *drb_api;
-
-// Screen bounds are currently just the DragonRuby defaults. We could make this configurable?
-static float g_screen_width = 1280.0f;
-static float g_screen_height = 720.0f;
-
-//config
-static const float PIXELS_PER_METER = 32.0f; // NOTE: this still needs some tuning. We might want to bring the average energy level down in individual box2d simulation islands
+// config
+static const float PIXELS_PER_METER = 32.0f; // NOTE: this still needs some tuning. We might want to bring the average energy level down in
+											 // individual box2d simulation islands
 
 // global game-specific physics state
 static b2WorldDef mainWorldDef;
 static Uint32 current_tick = 0;
 static Uint32 prev_tick = 0;
 
-// body_user_context provides the tetrimino block -specific gameplay related data, esp. to the ruby side of our codebase -- such as info on whether this block
-// collided this frame, that can be used for gameplay logic
+// box2d raycasts are used to detect horizontal lines of blocks for the clearing logic
+#define MAX_RAY_HITS 50
+// raycast_collection_t is a specific collection type for use with the callback functions to get a list of shapes
+// colliding with a raycast
+typedef struct {
+	b2ShapeId hit_shapes[MAX_RAY_HITS];
+	int count;
+} raycast_colletion_t;
+
+static float raycast_callback(b2ShapeId shape_id, b2Vec2 point, b2Vec2 normal, float fraction, void *user_data) {
+	raycast_colletion_t *collection = (raycast_colletion_t *)user_data;
+	if (collection->count < MAX_RAY_HITS) {
+		collection->hit_shapes[collection->count] = shape_id;
+		collection->count++;
+	}
+	return 1.0f; // always returning 1.0f makes the raycast always go full length, i.e. not stop on collisions. There might be better ways
+				 // to do this
+}
+
+// Collision filter categories
+#define TETROMINO_BIT 0x0001
+#define SENSOR_BIT 0x0002
+#define GROUND_BIT 0x0004
+
+typedef enum { BODY_TYPE_REGULAR, BODY_TYPE_SENSOR } body_type_t;
+// body_user_context provides the tetrimino block -specific gameplay related data, esp. to the ruby side of our codebase -- such as info on
+// whether this block collided this frame, that can be used for gameplay logic
 typedef struct {
 	mrb_value body_obj;
+	body_type_t type;
+	int contact_count;
 	bool collided;
 } body_user_context;
 
@@ -67,7 +91,7 @@ static const struct mrb_data_type b2WorldId_type = {
 
 static void b2BodyId_free(mrb_state *mrb, void *p) {
 	b2BodyId *bodyId = (b2BodyId *)p;
-	body_user_context *buc = (body_user_context*)b2Body_GetUserData(*bodyId);
+	body_user_context *buc = (body_user_context *)b2Body_GetUserData(*bodyId);
 	if (buc) {
 		drb_api->mrb_free(mrb, buc);
 	}
@@ -85,12 +109,6 @@ static b2Vec2 pixels_to_meters(float x, float y) { return (b2Vec2){x / PIXELS_PE
 static b2Vec2 meters_to_pixels(float x, float y) { return (b2Vec2){x * PIXELS_PER_METER, y * PIXELS_PER_METER}; }
 
 static mrb_value world_initialize(mrb_state *mrb, mrb_value self) {
-	mrb_float width, height;
-	drb_api->mrb_get_args(mrb, "ff", &width, &height);
-	g_screen_width = width;
-	g_screen_height = height;
-
-	b2SetLengthUnitsPerMeter(PIXELS_PER_METER);
 	mainWorldDef = b2DefaultWorldDef();
 	b2WorldId worldId = b2CreateWorld(&mainWorldDef);
 	b2World_SetGravity(worldId, (b2Vec2){0.0f, -9.8f});
@@ -105,7 +123,7 @@ static mrb_value world_initialize(mrb_state *mrb, mrb_value self) {
 
 static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
-	//printf("[CExt] -- INFO: Creating Body...\n");
+	// printf("[CExt] -- INFO: Creating Body...\n");
 	mrb_value type_str;
 	mrb_float x, y;
 	mrb_bool allow_sleep = true;
@@ -121,20 +139,22 @@ static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	b2BodyDef bodyDef = b2DefaultBodyDef();
 	bodyDef.position = pixels_to_meters(x, y);
 
-	body_user_context *holder = (body_user_context*)drb_api->mrb_malloc(mrb, sizeof(body_user_context));
+	body_user_context *holder = (body_user_context *)drb_api->mrb_malloc(mrb, sizeof(body_user_context));
 	holder->body_obj = body_obj;
+	holder->type = BODY_TYPE_REGULAR;
+	holder->contact_count = 0;
+	holder->collided = false;
 	bodyDef.userData = holder;
 
 	b2BodyType type = b2_staticBody;
 	if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "dynamic") == 0) {
 		type = b2_dynamicBody;
-		bodyDef.linearDamping = 0.5f;
-		bodyDef.angularDamping = 0.1f;
+		bodyDef.linearDamping = 0.1f;
+		bodyDef.angularDamping = 0.6f;
 		bodyDef.enableSleep = allow_sleep;
 	} else if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "kinematic") == 0) {
 		type = b2_kinematicBody;
 	}
-
 
 	bodyDef.type = type;
 	b2BodyId bodyId = b2CreateBody(*worldId, &bodyDef);
@@ -147,12 +167,42 @@ static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	return body_obj;
 }
 
+static mrb_value body_create_sensor_box(mrb_state *mrb, mrb_value self) {
+	b2BodyId *bodyId = DATA_PTR(self);
+
+	mrb_float width, height;
+	drb_api->mrb_get_args(mrb, "ff", &width, &height);
+
+	assert(width > 0.0f && "width cannot be zero or negative");
+	assert(height > 0.0f && "height cannot be zero or negative");
+
+	b2Vec2 half_extents_meters = (b2Vec2){width / PIXELS_PER_METER / 2.0f, height / PIXELS_PER_METER / 2.0f};
+	b2Polygon box = b2MakeBox(half_extents_meters.x, half_extents_meters.y);
+	b2ShapeDef shapeDef = b2DefaultShapeDef();
+	shapeDef.isSensor = true;
+	shapeDef.enableSensorEvents = true; // Enable sensor events for the sensor
+	shapeDef.filter.categoryBits = SENSOR_BIT;
+	shapeDef.filter.maskBits = TETROMINO_BIT;
+
+	body_user_context *holder = (body_user_context *)b2Body_GetUserData(*bodyId);
+	if (holder) {
+		holder->type = BODY_TYPE_SENSOR;
+		holder->contact_count = 0;
+	}
+
+	b2CreatePolygonShape(*bodyId, &shapeDef, &box);
+
+	return mrb_nil_value();
+}
+
 static mrb_value body_create_box_shape(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 
 	mrb_float width, height, density;
-	mrb_bool enable_contacts = false; // Default to false
-	drb_api->mrb_get_args(mrb, "fff|b", &width, &height, &density, &enable_contacts);
+	mrb_float friction = 0.5f;
+	mrb_float restitution = 0.1f;
+	mrb_bool enable_contacts = false;
+	drb_api->mrb_get_args(mrb, "fff|ffb", &width, &height, &density, &friction, &restitution, &enable_contacts);
 
 	assert(width > 0.0f && "width cannot be zero or negative");
 	assert(height > 0.0f && "height cannot be zero or negative");
@@ -161,6 +211,8 @@ static mrb_value body_create_box_shape(mrb_state *mrb, mrb_value self) {
 	b2Polygon box = b2MakeBox(half_extents_meters.x, half_extents_meters.y);
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
+	shapeDef.material.friction = friction;
+	shapeDef.material.restitution = restitution;
 	shapeDef.enableContactEvents = enable_contacts;
 	b2CreatePolygonShape(*bodyId, &shapeDef, &box);
 
@@ -169,7 +221,8 @@ static mrb_value body_create_box_shape(mrb_state *mrb, mrb_value self) {
 
 // Helper function to create an offset polygon for a box using b2MakeBox and translation
 // This is used to easily create the tetriminos
-static void create_offset_box_fixture(b2BodyId bodyId, const b2ShapeDef *shapeDef, float box_width_px, float box_height_px, float offset_x_px, float offset_y_px) {
+static void create_offset_box_fixture(b2BodyId bodyId, const b2ShapeDef *shapeDef, float box_width_px, float box_height_px,
+									  float offset_x_px, float offset_y_px) {
 	float hw_m = (box_width_px / PIXELS_PER_METER) / 2.0f;
 	float hh_m = (box_height_px / PIXELS_PER_METER) / 2.0f;
 	float offset_x_m = offset_x_px / PIXELS_PER_METER;
@@ -191,11 +244,18 @@ static void create_offset_box_fixture(b2BodyId bodyId, const b2ShapeDef *shapeDe
 static mrb_value body_create_t_shape(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	mrb_float square_size_px, density;
-	drb_api->mrb_get_args(mrb, "ff", &square_size_px, &density);
+	mrb_float friction = 0.5f;
+	mrb_float restitution = 0.1f;
+	drb_api->mrb_get_args(mrb, "ff|ff", &square_size_px, &density, &friction, &restitution);
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
+	shapeDef.material.friction = friction;
+	shapeDef.material.restitution = restitution;
 	shapeDef.enableContactEvents = true;
+	shapeDef.enableSensorEvents = true;
+	shapeDef.filter.categoryBits = TETROMINO_BIT;
+	shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
 
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -square_size_px, 0);
@@ -205,19 +265,23 @@ static mrb_value body_create_t_shape(mrb_state *mrb, mrb_value self) {
 	return mrb_nil_value();
 }
 
-// O-shape (2x2 box). Origin is the center of the 4 blocks.
-// ##
-// ##
 static mrb_value body_create_box_shape_2x2(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	mrb_float square_size_px, density;
-	drb_api->mrb_get_args(mrb, "ff", &square_size_px, &density);
+	mrb_float friction = 0.5f;
+	mrb_float restitution = 0.1f;
+	drb_api->mrb_get_args(mrb, "ff|ff", &square_size_px, &density, &friction, &restitution);
 
-	b2ShapeDef shapeDef = b2DefaultShapeDef();
+	b2ShapeDef shapeDef;
+	shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
+	shapeDef.material.friction = friction;
+	shapeDef.material.restitution = restitution;
 	shapeDef.enableContactEvents = true;
+	shapeDef.enableSensorEvents = true;
+	shapeDef.filter.categoryBits = TETROMINO_BIT;
+	shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
 
-	
 	float s_half = square_size_px / 2.0f;
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -s_half, -s_half);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, s_half, -s_half);
@@ -230,82 +294,102 @@ static mrb_value body_create_box_shape_2x2(mrb_state *mrb, mrb_value self) {
 // L-shape. Origin is the center of the 3-block segment.
 //   #
 //   #
-// ###
+//   ##
 static mrb_value body_create_l_shape(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	mrb_float square_size_px, density;
-	drb_api->mrb_get_args(mrb, "ff", &square_size_px, &density);
+	mrb_float friction = 0.5f;
+	mrb_float restitution = 0.1f;
+	drb_api->mrb_get_args(mrb, "ff|ff", &square_size_px, &density, &friction, &restitution);
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
+	shapeDef.material.friction = friction;
+	shapeDef.material.restitution = restitution;
 	shapeDef.enableContactEvents = true;
+	shapeDef.enableSensorEvents = true;
+	shapeDef.filter.categoryBits = TETROMINO_BIT;
+	shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
 
-	
-	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
+	// Horizontal bar
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -square_size_px, 0);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, square_size_px, 0);
+
+	// Vertical bar
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, square_size_px, square_size_px);
+	// create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, square_size_px, 2 * square_size_px);
 
 	return mrb_nil_value();
 }
 
 // J-shape (mirrored L). Origin is the center of the 3-block segment.
-// #
-// #
-// ###
+//   #
+//   #
+//  ##
 static mrb_value body_create_j_shape(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	mrb_float square_size_px, density;
-	drb_api->mrb_get_args(mrb, "ff", &square_size_px, &density);
+	mrb_float friction = 0.5f;
+	mrb_float restitution = 0.1f;
+	drb_api->mrb_get_args(mrb, "ff|ff", &square_size_px, &density, &friction, &restitution);
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
 	shapeDef.density = density;
+	shapeDef.material.friction = friction;
+	shapeDef.material.restitution = restitution;
 	shapeDef.enableContactEvents = true;
+	shapeDef.enableSensorEvents = true;
+	shapeDef.filter.categoryBits = TETROMINO_BIT;
+	shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
 
-	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -square_size_px, 0);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, square_size_px, 0);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -square_size_px, square_size_px);
+
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
 
 	return mrb_nil_value();
 }
 
 static mrb_value body_create_chain_shape(mrb_state *mrb, mrb_value self) {
-    b2BodyId* bodyId = DATA_PTR(self);
+	b2BodyId *bodyId = DATA_PTR(self);
 
-    mrb_value points_array;
-    mrb_bool loop;
+	mrb_value points_array;
+	mrb_bool loop;
 
-    drb_api->mrb_get_args(mrb, "A!b", &points_array, &loop);
+	drb_api->mrb_get_args(mrb, "A!b", &points_array, &loop);
 
-    int num_points = RARRAY_LEN(points_array);
-    if (num_points < 2) {
-        // A chain needs at least 2 points
-        return mrb_nil_value();
-    }
+	int num_points = RARRAY_LEN(points_array);
+	if (num_points < 2) {
+		// A chain needs at least 2 points
+		return mrb_nil_value();
+	}
 
-    b2Vec2* points = drb_api->mrb_malloc(mrb, sizeof(b2Vec2) * num_points);
-    for (int i = 0; i < num_points; i++) {
-        mrb_value point_hash = drb_api->mrb_ary_entry(points_array, i);
-        mrb_value x_val = drb_api->mrb_hash_get(mrb, point_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")));
-        mrb_value y_val = drb_api->mrb_hash_get(mrb, point_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")));
+	b2Vec2 *points = drb_api->mrb_malloc(mrb, sizeof(b2Vec2) * num_points);
+	for (int i = 0; i < num_points; i++) {
+		mrb_value point_hash = drb_api->mrb_ary_entry(points_array, i);
+		mrb_value x_val = drb_api->mrb_hash_get(mrb, point_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")));
+		mrb_value y_val = drb_api->mrb_hash_get(mrb, point_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")));
 
-        float x = drb_api->mrb_to_flo(mrb, x_val);
-        float y = drb_api->mrb_to_flo(mrb, y_val);
+		float x = drb_api->mrb_to_flo(mrb, x_val);
+		float y = drb_api->mrb_to_flo(mrb, y_val);
 
-        points[i] = pixels_to_meters(x, y);
-    }
+		points[i] = pixels_to_meters(x, y);
+	}
 
-    b2ChainDef chainDef = b2DefaultChainDef();
-    chainDef.points = points;
-    chainDef.count = num_points;
-    chainDef.isLoop = loop;
+	b2ChainDef chainDef = b2DefaultChainDef();
+	chainDef.points = points;
+	chainDef.count = num_points;
+	chainDef.isLoop = loop;
+	chainDef.filter.categoryBits = GROUND_BIT;
+	chainDef.filter.maskBits = TETROMINO_BIT;
 
-    b2CreateChain(*bodyId, &chainDef);
+	b2CreateChain(*bodyId, &chainDef);
 
-    drb_api->mrb_free(mrb, points);
+	drb_api->mrb_free(mrb, points);
 
-    return mrb_nil_value();
+	return mrb_nil_value();
 }
 
 #define MAX_DELTA 0.032f
@@ -316,16 +400,163 @@ static float get_delta_time() {
 	float dt = (float)(current_tick - prev_tick) / 1000.0f;
 	// tad hacky, but sometimes the simulation gets called with a very long pause in ticks (in Box2D side) - to avoid
 	// and unstable simulation (== wildly flying pieces) we constrain the delta time to some sane limit that needs tuning
-	if (dt > MAX_DELTA) dt = MAX_DELTA;
+	if (dt > MAX_DELTA)
+		dt = MAX_DELTA;
 	prev_tick = current_tick;
 	return dt;
 }
 
+typedef struct {
+	b2ShapeId shape_id;
+	b2Vec2 pos;
+} ShapeInfo;
+
+int compare_shapes(const void *a, const void *b) {
+	ShapeInfo *shapeA = (ShapeInfo *)a;
+	ShapeInfo *shapeB = (ShapeInfo *)b;
+	return (shapeA->pos.x > shapeB->pos.x) - (shapeA->pos.x < shapeB->pos.x);
+}
+
+// main raycasting function
+static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
+	b2WorldId *worldId = DATA_PTR(self);
+
+	mrb_float x1, y1, x2, y2;
+	mrb_int min_hits = 12;
+	mrb_float vertical_tolerance = 3.0f;
+	mrb_float horizontal_tolerance = 32.0f * 1.2f;
+
+
+	drb_api->mrb_get_args(mrb, "ffff|iff", &x1, &y1, &x2, &y2, &min_hits, &vertical_tolerance, &horizontal_tolerance);
+
+	b2Vec2 p1 = pixels_to_meters(x1, y1);
+	b2Vec2 p2 = pixels_to_meters(x2, y2);
+	b2Vec2 tr = b2Sub(p2, p1);
+
+	raycast_colletion_t ray_collection = {0};
+	b2QueryFilter filter = b2DefaultQueryFilter();
+	filter.maskBits = TETROMINO_BIT;
+
+	b2World_CastRay(*worldId, p1, tr, filter, raycast_callback, &ray_collection);
+
+	if (ray_collection.count < min_hits) {
+		return drb_api->mrb_ary_new(mrb);
+	}
+
+	b2Vec2 *positions = drb_api->mrb_malloc(mrb, sizeof(b2Vec2) * ray_collection.count);
+	b2ShapeId *shape_ids = drb_api->mrb_malloc(mrb, sizeof(b2ShapeId) * ray_collection.count);
+	float total_y = 0;
+	int added_shapes = 0; // should be called "stationary shape count" or smth
+
+	const float max_velocity = 0.01f; // TODO: tune this value...
+
+	for (int i = 0; i < ray_collection.count; ++i) {
+		b2ShapeId shape_id = ray_collection.hit_shapes[i];
+		b2BodyId body_id = b2Shape_GetBody(shape_id);
+
+		// we ignore moving blocks entirely
+		b2Vec2 velocity = b2Body_GetLinearVelocity(body_id);
+		if (b2LengthSquared(velocity) > max_velocity) {
+			continue;
+		}
+
+		b2Polygon poly = b2Shape_GetPolygon(shape_id);
+		b2Vec2 local_pos = poly.centroid;
+		b2Transform transform = b2Body_GetTransform(body_id);
+		b2Vec2 pos = b2TransformPoint(transform, local_pos);
+
+		positions[added_shapes] = meters_to_pixels(pos.x, pos.y);
+		shape_ids[added_shapes] = shape_id;
+		total_y += positions[added_shapes].y;
+		added_shapes++;
+	}
+
+	float avg_y = total_y / added_shapes;
+	b2Vec2 *vertically_aligned_positions = drb_api->mrb_malloc(mrb, sizeof(b2Vec2) * added_shapes);
+	b2ShapeId *vertically_aligned_shape_ids = drb_api->mrb_malloc(mrb, sizeof(b2ShapeId) * added_shapes);
+	int aligned_count = 0;
+
+	for (int i = 0; i < added_shapes; ++i) {
+		if (fabs(positions[i].y - avg_y) < vertical_tolerance) {
+			vertically_aligned_positions[aligned_count] = positions[i];
+			vertically_aligned_shape_ids[aligned_count] = shape_ids[i];
+			aligned_count++;
+		}
+	}
+
+	drb_api->mrb_free(mrb, positions);
+	drb_api->mrb_free(mrb, shape_ids);
+
+	if (aligned_count < min_hits) {
+		drb_api->mrb_free(mrb, vertically_aligned_positions);
+		drb_api->mrb_free(mrb, vertically_aligned_shape_ids);
+		return drb_api->mrb_ary_new(mrb);
+	}
+
+	b2ShapeId *largest_group_ids = NULL;
+	b2Vec2 *largest_group_positions = NULL;
+	int max_group_size = 0;
+	int current_group_start = 0;
+
+	for (int i = 1; i < aligned_count; ++i) {
+		if (vertically_aligned_positions[i].x - vertically_aligned_positions[i - 1].x > horizontal_tolerance) {
+			if (i - current_group_start > max_group_size) {
+				max_group_size = i - current_group_start;
+				largest_group_ids = &vertically_aligned_shape_ids[current_group_start];
+				largest_group_positions = &vertically_aligned_positions[current_group_start];
+			}
+			current_group_start = i;
+		}
+	}
+	if (aligned_count - current_group_start > max_group_size) {
+		max_group_size = aligned_count - current_group_start;
+		largest_group_ids = &vertically_aligned_shape_ids[current_group_start];
+		largest_group_positions = &vertically_aligned_positions[current_group_start];
+	}
+
+	mrb_value results = drb_api->mrb_ary_new(mrb);
+	if (max_group_size >= min_hits) {
+		for (int i = 0; i < max_group_size; ++i) {
+			b2DestroyShape(largest_group_ids[i], true);
+
+			mrb_value hit_hash = drb_api->mrb_hash_new(mrb);
+			drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
+								  drb_api->mrb_float_value(mrb, largest_group_positions[i].x));
+			drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")),
+								  drb_api->mrb_float_value(mrb, largest_group_positions[i].y));
+			drb_api->mrb_ary_push(mrb, results, hit_hash);
+		}
+	}
+
+	drb_api->mrb_free(mrb, vertically_aligned_positions);
+	drb_api->mrb_free(mrb, vertically_aligned_shape_ids);
+	return results;
+}
+
 static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
-	
+
 	float dt = get_delta_time();
 	b2World_Step(*worldId, dt, 8);
+
+	b2SensorEvents sensorEvents = b2World_GetSensorEvents(*worldId);
+	for (int i = 0; i < sensorEvents.beginCount; ++i) {
+		b2SensorBeginTouchEvent event = sensorEvents.beginEvents[i];
+		b2BodyId sensorBodyId = b2Shape_GetBody(event.sensorShapeId);
+		body_user_context *sensorHolder = (body_user_context *)b2Body_GetUserData(sensorBodyId);
+		if (sensorHolder && sensorHolder->type == BODY_TYPE_SENSOR) {
+			sensorHolder->contact_count++;
+		}
+	}
+
+	for (int i = 0; i < sensorEvents.endCount; ++i) {
+		b2SensorEndTouchEvent event = sensorEvents.endEvents[i];
+		b2BodyId sensorBodyId = b2Shape_GetBody(event.sensorShapeId);
+		body_user_context *sensorHolder = (body_user_context *)b2Body_GetUserData(sensorBodyId);
+		if (sensorHolder && sensorHolder->type == BODY_TYPE_SENSOR) {
+			sensorHolder->contact_count--;
+		}
+	}
 
 	b2ContactEvents events = b2World_GetContactEvents(*worldId);
 	for (int i = 0; i < events.beginCount; ++i) {
@@ -333,32 +564,25 @@ static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 		b2BodyId bodyIdA = b2Shape_GetBody(event.shapeIdA);
 		b2BodyId bodyIdB = b2Shape_GetBody(event.shapeIdB);
 
-		body_user_context *holderA = (body_user_context*)b2Body_GetUserData(bodyIdA);
-		body_user_context *holderB = (body_user_context*)b2Body_GetUserData(bodyIdB);
+		body_user_context *holderA = (body_user_context *)b2Body_GetUserData(bodyIdA);
+		body_user_context *holderB = (body_user_context *)b2Body_GetUserData(bodyIdB);
 
-		if (holderA && holderB) {
-			mrb_value ruby_body_a = holderA->body_obj;
-			mrb_value ruby_body_b = holderB->body_obj;
-
-			mrb_value contacts_a = drb_api->mrb_iv_get(mrb, ruby_body_a, drb_api->mrb_intern_lit(mrb, "@contacts"));
-			if (mrb_nil_p(contacts_a)) {
-				contacts_a = drb_api->mrb_ary_new(mrb);
-				drb_api->mrb_iv_set(mrb, ruby_body_a, drb_api->mrb_intern_lit(mrb, "@contacts"), contacts_a);
-			}
-			mrb_value b_id = drb_api->mrb_funcall(mrb, ruby_body_b, "object_id", 0);
-			drb_api->mrb_ary_push(mrb, contacts_a, b_id);
-
-			mrb_value contacts_b = drb_api->mrb_iv_get(mrb, ruby_body_b, drb_api->mrb_intern_lit(mrb, "@contacts"));
-			if (mrb_nil_p(contacts_b)) {
-				contacts_b = drb_api->mrb_ary_new(mrb);
-				drb_api->mrb_iv_set(mrb, ruby_body_b, drb_api->mrb_intern_lit(mrb, "@contacts"), contacts_b);
-			}
-			mrb_value a_id = drb_api->mrb_funcall(mrb, ruby_body_a, "object_id", 0);
-			drb_api->mrb_ary_push(mrb, contacts_b, a_id);
-		}
+		if (holderA)
+			holderA->collided = true;
+		if (holderB)
+			holderB->collided = true;
 	}
 
 	return mrb_nil_value();
+}
+
+static mrb_value body_has_collided(mrb_state *mrb, mrb_value self) {
+	b2BodyId *bodyId = DATA_PTR(self);
+	body_user_context *buc = (body_user_context *)b2Body_GetUserData(*bodyId);
+	if (buc) {
+		return mrb_bool_value(buc->collided);
+	}
+	return mrb_false_value();
 }
 
 static mrb_value body_get_info(mrb_state *mrb, mrb_value self) {
@@ -418,7 +642,7 @@ static mrb_value body_extents(mrb_state *mrb, mrb_value self) {
 		b2Polygon polygon = b2Shape_GetPolygon(shapeId);
 		// Calculate width and height from the polygon's vertices
 		// Assuming a box created by b2MakeBox, vertices are at (-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)
-		float width_meters = polygon.vertices[1].x - polygon.vertices[0].x; // (halfWidth - (-halfWidth)) = 2 * halfWidth
+		float width_meters = polygon.vertices[1].x - polygon.vertices[0].x;	 // (halfWidth - (-halfWidth)) = 2 * halfWidth
 		float height_meters = polygon.vertices[2].y - polygon.vertices[1].y; // (halfHeight - (-halfHeight)) = 2 * halfHeight
 
 		mrb_value hash = drb_api->mrb_hash_new(mrb);
@@ -438,7 +662,7 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 	// First, get the count of shapes
 	int shapeCount = b2Body_GetShapeCount(*bodyId);
 	if (shapeCount == 0) {
- 	return drb_api->mrb_ary_new(mrb); // NOTE: should probably just return nil here!
+		return drb_api->mrb_ary_new(mrb); // NOTE: should probably just return nil here!
 	}
 
 	// Allocate memory to hold the shape IDs
@@ -469,7 +693,7 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 			float width_meters = max_v.x - min_v.x;
 			float height_meters = max_v.y - min_v.y;
 
-  	mrb_value hash = drb_api->mrb_hash_new(mrb);
+			mrb_value hash = drb_api->mrb_hash_new(mrb);
 			drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "x")),
 								  drb_api->mrb_float_value(mrb, center_meters.x * PIXELS_PER_METER));
 			drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "y")),
@@ -481,22 +705,22 @@ static mrb_value body_get_shapes_info(mrb_state *mrb, mrb_value self) {
 
 			drb_api->mrb_ary_push(mrb, result_array, hash);
 		} else if (b2Shape_GetType(shapeId) == b2_chainSegmentShape) {
-            b2ChainSegment segment = b2Shape_GetChainSegment(shapeId);
-            b2Vec2 p1 = meters_to_pixels(segment.segment.point1.x, segment.segment.point1.y);
-            b2Vec2 p2 = meters_to_pixels(segment.segment.point2.x, segment.segment.point2.y);
+			b2ChainSegment segment = b2Shape_GetChainSegment(shapeId);
+			b2Vec2 p1 = meters_to_pixels(segment.segment.point1.x, segment.segment.point1.y);
+			b2Vec2 p2 = meters_to_pixels(segment.segment.point2.x, segment.segment.point2.y);
 
-            mrb_value hash = drb_api->mrb_hash_new(mrb);
-            drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "x1")),
-                                  drb_api->mrb_float_value(mrb, p1.x));
-            drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "y1")),
-                                  drb_api->mrb_float_value(mrb, p1.y));
-            drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "x2")),
-                                  drb_api->mrb_float_value(mrb, p2.x));
-            drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "y2")),
-                                  drb_api->mrb_float_value(mrb, p2.y));
+			mrb_value hash = drb_api->mrb_hash_new(mrb);
+			drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "x1")),
+								  drb_api->mrb_float_value(mrb, p1.x));
+			drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "y1")),
+								  drb_api->mrb_float_value(mrb, p1.y));
+			drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "x2")),
+								  drb_api->mrb_float_value(mrb, p2.x));
+			drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_cstr(mrb, "y2")),
+								  drb_api->mrb_float_value(mrb, p2.y));
 
-            drb_api->mrb_ary_push(mrb, result_array, hash);
-        }
+			drb_api->mrb_ary_push(mrb, result_array, hash);
+		}
 	}
 
 	drb_api->mrb_free(mrb, shapeIds);
@@ -519,7 +743,7 @@ static mrb_value body_set_rotation(mrb_state *mrb, mrb_value self) {
 
 	float angle_radians = angle_degrees * (M_PI / 180.0f);
 	b2Vec2 position = b2Body_GetPosition(*bodyId);
-	
+
 	// Manually create the rotation struct from the angle
 	b2Rot rotation;
 	rotation.s = sinf(angle_radians);
@@ -544,18 +768,18 @@ static mrb_value body_apply_force_center(mrb_state *mrb, mrb_value self) {
 }
 
 static mrb_value body_apply_impulse_center(mrb_state *mrb, mrb_value self) {
-	b2BodyId* bodyId = DATA_PTR(self);
+	b2BodyId *bodyId = DATA_PTR(self);
 
 	mrb_float force_x, force_y;
 	drb_api->mrb_get_args(mrb, "ff", &force_x, &force_y);
-	b2Vec2 impulse = {force_x / PIXELS_PER_METER, force_y / PIXELS_PER_METER };
+	b2Vec2 impulse = {force_x / PIXELS_PER_METER, force_y / PIXELS_PER_METER};
 
 	b2Body_ApplyLinearImpulseToCenter(*bodyId, impulse, true);
 	return mrb_nil_value();
 }
 
 static mrb_value body_apply_impulse_for_velocity(mrb_state *mrb, mrb_value self) {
-	b2BodyId* bodyId = DATA_PTR(self);
+	b2BodyId *bodyId = DATA_PTR(self);
 
 	mrb_float vel_x, vel_y;
 	drb_api->mrb_get_args(mrb, "ff", &vel_x, &vel_y);
@@ -572,13 +796,44 @@ static mrb_value body_apply_impulse_for_velocity(mrb_state *mrb, mrb_value self)
 	return mrb_nil_value();
 }
 
-static mrb_value body_rotate_towards_angle(mrb_state *mrb, mrb_value self) {
-	// TODO: implement rotation towards a given angle; for now, no-op.
+#define MAX_ROT_DEGREES 5
+
+// TODO: clean up this mess...
+static mrb_value body_rotate(mrb_state *mrb, mrb_value self) {
+	b2BodyId *bodyId = DATA_PTR(self);
+	b2Rot rotation = b2Body_GetRotation(*bodyId);
+	float angle_radians = b2Rot_GetAngle(rotation);
+
+	mrb_float delta_angle_degrees;
+	drb_api->mrb_get_args(mrb, "f", &delta_angle_degrees);
+	float delta_radians = delta_angle_degrees * (M_PI / 180.0f);
+	float next_angle = angle_radians + b2Body_GetAngularVelocity(*bodyId) / 60.0f;
+	float total_rotation = angle_radians + delta_radians - next_angle;
+
+	while (total_rotation < -180.0f * DEGTORAD)
+		total_rotation += 360.0f * DEGTORAD;
+	while (total_rotation > 180.0f * DEGTORAD)
+		total_rotation -= 360.0f * DEGTORAD;
+	float desiredAngularVelocity = total_rotation * 60;
+	float change = MAX_ROT_DEGREES * DEGTORAD;
+	desiredAngularVelocity = fminf(change, fmaxf(-change, desiredAngularVelocity));
+	float impulse = b2Body_GetRotationalInertia(*bodyId) * desiredAngularVelocity;
+	b2Body_ApplyAngularImpulse(*bodyId, impulse, true);
+
 	return mrb_nil_value();
 }
 
 static mrb_value body_get_contacts(mrb_state *mrb, mrb_value self) {
 	return drb_api->mrb_iv_get(mrb, self, drb_api->mrb_intern_lit(mrb, "@contacts"));
+}
+
+static mrb_value body_get_sensor_contact_count(mrb_state *mrb, mrb_value self) {
+	b2BodyId *bodyId = DATA_PTR(self);
+	body_user_context *holder = (body_user_context *)b2Body_GetUserData(*bodyId);
+	if (holder && holder->type == BODY_TYPE_SENSOR) {
+		return drb_api->mrb_int_value(mrb, holder->contact_count);
+	}
+	return drb_api->mrb_int_value(mrb, 0);
 }
 
 DRB_FFI_EXPORT
@@ -590,17 +845,19 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	struct RClass *base = state->object_class;
 	// World Ruby class definition
 	struct RClass *World = drb_api->mrb_define_class_under(state, module, "World", base);
-	drb_api->mrb_define_method(state, World, "initialize", world_initialize, MRB_ARGS_REQ(2));
+	drb_api->mrb_define_method(state, World, "initialize", world_initialize, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, World, "create_body", world_create_body, MRB_ARGS_ARG(3, 1));
 	drb_api->mrb_define_method(state, World, "step", world_step, MRB_ARGS_NONE());
+	drb_api->mrb_define_method(state, World, "raycast", world_raycast, MRB_ARGS_ARG(4, 1));
 
 	// Body Ruby class definition
 	struct RClass *Body = drb_api->mrb_define_class_under(state, module, "Body", base);
-	drb_api->mrb_define_method(state, Body, "create_box_shape", body_create_box_shape, MRB_ARGS_ARG(3, 1));
-	drb_api->mrb_define_method(state, Body, "create_t_shape", body_create_t_shape, MRB_ARGS_REQ(2));
-	drb_api->mrb_define_method(state, Body, "create_box_shape_2x2", body_create_box_shape_2x2, MRB_ARGS_REQ(2));
-	drb_api->mrb_define_method(state, Body, "create_l_shape", body_create_l_shape, MRB_ARGS_REQ(2));
-	drb_api->mrb_define_method(state, Body, "create_j_shape", body_create_j_shape, MRB_ARGS_REQ(2));
+	drb_api->mrb_define_method(state, Body, "create_box_shape", body_create_box_shape, MRB_ARGS_ARG(3, 3));
+	drb_api->mrb_define_method(state, Body, "create_sensor_box", body_create_sensor_box, MRB_ARGS_REQ(2));
+	drb_api->mrb_define_method(state, Body, "create_t_shape", body_create_t_shape, MRB_ARGS_ARG(2, 2));
+	drb_api->mrb_define_method(state, Body, "create_box_shape_2x2", body_create_box_shape_2x2, MRB_ARGS_ARG(2, 2));
+	drb_api->mrb_define_method(state, Body, "create_l_shape", body_create_l_shape, MRB_ARGS_ARG(2, 2));
+	drb_api->mrb_define_method(state, Body, "create_j_shape", body_create_j_shape, MRB_ARGS_ARG(2, 2));
 	drb_api->mrb_define_method(state, Body, "create_chain_shape", body_create_chain_shape, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "position", body_position, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "position_meters", body_position_meters, MRB_ARGS_NONE());
@@ -608,10 +865,14 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	drb_api->mrb_define_method(state, Body, "get_shapes_info", body_get_shapes_info, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "angle", body_angle, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "angle=", body_set_rotation, MRB_ARGS_REQ(1));
+	drb_api->mrb_define_method(state, Body, "rotate", body_rotate, MRB_ARGS_REQ(1));
 	drb_api->mrb_define_method(state, Body, "apply_force_center", body_apply_force_center, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "apply_impulse_center", body_apply_impulse_center, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "apply_impulse_for_velocity", body_apply_impulse_for_velocity, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "get_info", body_get_info, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "awake?", body_is_awake, MRB_ARGS_NONE());
-	drb_api->mrb_define_method(state, Body, "contacts", body_get_contacts,MRB_ARGS_NONE());
+	drb_api->mrb_define_method(state, Body, "collided?", body_has_collided, MRB_ARGS_NONE());
+	// TODO: remove old contact mehods which aren't used anymore?
+	drb_api->mrb_define_method(state, Body, "contacts", body_get_contacts, MRB_ARGS_NONE());
+	drb_api->mrb_define_method(state, Body, "sensor_contact_count", body_get_sensor_contact_count, MRB_ARGS_NONE());
 }
