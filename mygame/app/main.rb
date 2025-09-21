@@ -5,44 +5,50 @@ module PhysicsHelpers
   end
 
   def create_sensor_box(args, x, y, w, h)
-    body = create_body(args, "static", x, y, allow_sleep: false)
+    body = create_body(args, 'static', x, y, allow_sleep: false)
     body.create_sensor_box(w, h)
     body
   end
 
   def create_dynamic_box(args, x, y, w, h, density: 1.0, contacts: false, allow_sleep: true)
-    body = create_body(args, "dynamic", x, y, allow_sleep: allow_sleep)
+    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep)
     body.create_box_shape(w, h, density, contacts)
     body
   end
 
   def create_static_box(args, x, y, w, h, density: 1.0, contacts: false)
-    body = create_body(args, "static", x, y)
+    body = create_body(args, 'static', x, y)
     body.create_box_shape(w, h, density, contacts)
     body
   end
 
   def create_t_block(args, x, y, square_size: 20, density: 1.0, allow_sleep: true)
-    body = create_body(args, "dynamic", x, y, allow_sleep: allow_sleep)
+    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep)
     body.create_t_shape(square_size, density)
     body
   end
 
   def create_o_block(args, x, y, square_size: 20, density: 1.0, allow_sleep: true)
-    body = create_body(args, "dynamic", x, y, allow_sleep: allow_sleep)
+    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep)
     body.create_box_shape_2x2(square_size, density)
     body
   end
 
   def create_l_block(args, x, y, square_size: 20, density: 1.0, allow_sleep: true)
-    body = create_body(args, "dynamic", x, y, allow_sleep: allow_sleep)
+    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep)
     body.create_l_shape(square_size, density)
     body
   end
 
   def create_j_block(args, x, y, square_size: 20, density: 1.0, allow_sleep: true)
-    body = create_body(args, "dynamic", x, y, allow_sleep: allow_sleep)
+    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep)
     body.create_j_shape(square_size, density)
+    body
+  end
+
+  def create_i_block(args, x, y, square_size: 20, density: 1.0, allow_sleep: true)
+    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep)
+    body.create_i_shape(square_size, density)
     body
   end
 end
@@ -51,10 +57,27 @@ class Game
   include PhysicsHelpers
   attr_accessor :active_block
   attr_reader :args, :block_types
+
+  def reset_game
+    # Reset dynamic game state and frame counters to a known baseline
+    args.state.blocks = []
+    @active_block = nil
+    args.state.paused = false
+    args.state.game_over = false
+
+    # Frame/cycle counters and timers
+    @spawn_collision_check_frames = 0
+    @lock_delay_frames = 8
+    @spawn_delay_frames = 45
+    @touching_frames = 0
+    @pending_spawn_frames = 0 # trigger initial spawn via countdown
+    @last_spawned_block = nil
+  end
+
   def initialize(args)
     @args = args
-    @block_types = [:create_t_block, :create_o_block, :create_l_block, :create_j_block]
-    @colors = ['violet', 'orange', 'blue', 'green'] # 'yellow', 'red'
+    @block_types = [:create_t_block, :create_o_block, :create_l_block, :create_j_block, :create_i_block]
+    @colors = ['violet', 'orange', 'blue', 'green', 'red', 'yellow'] # 'yellow', 'red'
     @pastel_colors = {
       # r, g, b, a
       'violet' => [200, 160, 220],
@@ -82,7 +105,7 @@ class Game
       { x: 0, y: 100 }
     ]
     
-    args.state.ground = create_body(args, "static", 0, 0)
+    args.state.ground = create_body(args, 'static', 0, 0)
     args.state.ground.create_chain_shape(terrain_points, false)
 
     args.state.blocks ||= []
@@ -120,20 +143,31 @@ class Game
 
     # TODO: flag these options somehow
     args.state.profile ||= false
+
+    # Ensure dynamic game state is reset to a known baseline (including counters)
+    reset_game
   end
 
   def tick
     handle_input
 
-    update unless args.state.paused
+    update unless args.state.paused || args.state.game_over
 
     render
   end
 
   def handle_input
+    $gtk.request_quit if args.inputs.keyboard.key_down.escape # TODO: check what this does on mobile & Web
+
+    if args.state.game_over
+      if args.inputs.keyboard.key_down.r || args.inputs.keyboard.key_down.enter || args.inputs.keyboard.key_down.space
+        reset_game
+      end
+      return
+    end
+
     args.state.paused = !args.state.paused if args.inputs.keyboard.key_down.p
 
-    $gtk.request_quit if args.inputs.keyboard.key_down.escape
 
     if @active_block
       args.state.horizontal = args.inputs.left_right * 5.0
@@ -142,47 +176,72 @@ class Game
                             else
                               -2.4
                             end
-      rot_dir = if args.inputs.keyboard.key_down_or_held? "q"
+      rot_dir = if args.inputs.keyboard.key_down_or_held? 'q'
                   1.0
-                elsif args.inputs.keyboard.key_down_or_held? "e"
+                elsif args.inputs.keyboard.key_down_or_held? 'e'
                   -1.0
                 else
                   0.0
                 end
-      args.state.rot_dir = rot_dir
+      args.state.rot_dir = rot_dir * 50.0
     end
   end
 
   def update
     # pre-update: apply impulses / control and update active tetrimino state
     if @active_block
-      if @active_block.body.collided?
-        # TODO: less magicy numbers, but on  last frame we want to remove horizontal movement...
-        @active_block.body.apply_impulse_for_velocity(0.0, -2.4)
-        @active_block = nil
-      else
-        hor = args.state.horizontal
-        ver = args.state.vertical
-        @active_block.body.apply_impulse_for_velocity(hor, ver)
-
-        # TODO: rotate active block per input
-        #unless args.state.rot_dir.zero?
-          @active_block.body.rotate(50 * args.state.rot_dir)
-        #end
-      end
+      hor = args.state.horizontal
+      ver = args.state.vertical
+      @active_block.body.apply_impulse_for_velocity(hor, ver)
+      @active_block.body.rotate(args.state.rot_dir)
     end
 
     # update Box2D world
     args.state.world.step
 
-    if (args.state.tick_count % 60) == 0 && @active_block.nil?
-      spawn_random_tetrimino
-      @active_block = args.state.blocks.last
+    # Post-step: handle lock delay for active block collisions, spawn delay etc.
+    if @active_block
+      if @active_block.body.collided?
+        @touching_frames += 1
+        if @touching_frames >= @lock_delay_frames
+          # On lock, release control and start spawn delay
+          @active_block.body.apply_impulse_for_velocity(0.0, -2.4)
+          @active_block = nil
+          @touching_frames = 0
+          @pending_spawn_frames = @spawn_delay_frames
+        end
+      else
+        @touching_frames = 0
+      end
     end
 
+    # Handle pending spawn delay
+    if @active_block.nil? && @pending_spawn_frames
+      @pending_spawn_frames -= 1
+      if @pending_spawn_frames <= 0
+        spawn_random_tetrimino
+        @active_block = args.state.blocks.last
+        @last_spawned_block = @active_block
+        @spawn_collision_check_frames = 2
+        @pending_spawn_frames = nil
+      end
+    end
+
+    # post-physics step: check for immediate collision of just spawned block
+    if @spawn_collision_check_frames.to_i > 0 && @last_spawned_block
+      if @last_spawned_block.body.collided?
+        args.state.game_over = true
+      end
+      @spawn_collision_check_frames -= 1
+      @last_spawned_block = nil if @spawn_collision_check_frames <= 0
+    end
+
+
+    # scoring mechanics
     check_for_cleared_lines
 
     # post-update cleanup
+    # NOTE: this could affect scoring as well? Minus points on blocks "lost" ?
     args.state.blocks.reject! do |block|
       block[:body].position[:y] < -100 || block[:body].get_shapes_info.empty?
     end
@@ -232,7 +291,6 @@ class Game
     # render the pre-baked background, ground and other baked render targets / static elements
     sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :static_elements }
 
-    # Render all the physical blocks
     # NOTE: this is quite heavy atm and could do with a bunch of optimization
     args.state.blocks.each do |block_info|
       body = block_info[:body]
@@ -255,7 +313,7 @@ class Game
         final_x = body_pos[:x] + rotated_rel_x
         final_y = body_pos[:y] + rotated_rel_y
 
-        extra_size_px = 2 # we add a tiny bit of extra width and height to the blocks, as the texture has some alpha around the borders
+        extra_size_px = 1 # a tiny bit of extra width and height to the blocks, as the texture has some buffer
         sprites << {
           x: final_x,
           y: final_y,
@@ -273,28 +331,33 @@ class Game
       end
     end
 
-    ### Raycast tests:
-    @raycast_y_coords.each do |ray_y|
-      args.outputs.lines << {
-        x: 200, y: ray_y,
-        x2: 200 + 880, y2: ray_y,
-        r: 255, g: 100, b: 100, a: 100
-      }
-    end
+
 
     @all_shapes_hit.each do |s|
         sprites << { x: s.x, y: s.y, w: 12, h: 12, path: :pixel, r:153, g:255, b:153, a:255, anchor_x: 0.5, anchor_y: 0.5 }
     end
-    ### 
 
     sleeping_blocks = args.state.blocks.size - args.state.blocks.count { |b| b.body.awake? }
-    labels << {alignment_enum: 1, font: "fonts/dirty_harold/dirty_harold.ttf", x: args.grid.w / 2.0, y: args.grid.h - 10, r: 20, g: 20, b: 20, text: "FPS: #{args.gtk.current_framerate.round} | Blocks: #{args.state.blocks.count} Sleeping blocks: #{sleeping_blocks}"}
+    labels << { alignment_enum: 1, font: 'fonts/dirty_harold/dirty_harold.ttf', x: args.grid.w / 2.0,
+                y: args.grid.h - 10, r: 20, g: 20, b: 20, 
+                text: "FPS: #{args.gtk.current_framerate.round} | Blocks: #{args.state.blocks.count} Sleeping blocks: #{sleeping_blocks}"}
 
-    labels << {alignment_enum: 1, font: "fonts/dirty_harold/dirty_harold.ttf", x: args.grid.w / 2.0, y: 40.from_top, r: 20, g: 20, b: 20, text: "Active block collided: #{@active_block.body.collided?}"} if @active_block
+    labels << { alignment_enum: 1, font: 'fonts/dirty_harold/dirty_harold.ttf', x: args.grid.w / 2.0, y: 40.from_top,
+                r: 20, g: 20, b: 20, text: "Active block collided: #{@active_block.body.collided?}"} if @active_block
 
     if args.state.paused
       sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :pixel, r: 0, g: 0, b: 0, a: 150 }
-      labels << { x: args.grid.center_x, y: args.grid.center_y, text: "Paused", size_enum: 10, alignment_enum: 1, r: 255, g: 255, b: 255, font: "fonts/dirty_harold/dirty_harold.ttf" }
+      labels << { x: args.grid.center_x, y: args.grid.center_y, text: 'Paused', size_enum: 10, alignment_enum: 1, r: 255, g: 255, b: 255, font: 'fonts/dirty_harold/dirty_harold.ttf' }
+    end
+
+    if args.state.game_over
+      sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :pixel, r: 0, g: 0, b: 0, a: 180 }
+      labels << { x: args.grid.center_x, y: args.grid.center_y + 40, text: 'Game Over', size_enum: 10,
+                  alignment_enum: 1, r: 255, g: 255, b: 255, font: 'fonts/dirty_harold/dirty_harold.ttf' }
+      labels << { x: args.grid.center_x, y: args.grid.center_y - 10, text: 'Score: 0', size_enum: 4,
+                  alignment_enum: 1, r: 240, g: 240, b: 240, font: 'fonts/dirty_harold/dirty_harold.ttf' }
+      labels << { x: args.grid.center_x, y: args.grid.center_y - 60, text: 'Press R to restart', size_enum: 4,
+                  alignment_enum: 1, r: 240, g: 240, b: 240, font: 'fonts/dirty_harold/dirty_harold.ttf' }
     end
 
     args.outputs.sprites << sprites
@@ -303,13 +366,20 @@ class Game
     if args.state.profile
       args.outputs.primitives << args.gtk.framerate_diagnostics_primitives
       #args.outputs.debug.watch "render debug data here ..."
+      @raycast_y_coords.each do |ray_y|
+        args.outputs.lines << {
+          x: 200, y: ray_y,
+          x2: 200 + 880, y2: ray_y,
+          r: 255, g: 100, b: 100, a: 100
+        }
+      end
     end
   end
 end
 
 def tick(args)
   unless args.state.game
-    GTK.ffi_misc.gtk_dlopen("ext")
+    GTK.ffi_misc.gtk_dlopen('ext')
     $game = Game.new(args)
     args.state.game = $game
     $game.setup

@@ -2,7 +2,7 @@
 devid=zebraif
 devtitle=ZebraIF
 gameid=boxdragon
-gametitle=boxdragon
+gametitle=Falling Blocks
 version=0.1
 icon=metadata/icon.png
 
@@ -18,7 +18,7 @@ icon=metadata/icon.png
 # - 0: nearest neighbor, pixel perfect scaling (use this if your game uses pixel-art)
 # - 1: linear, less blocky visuals
 # - 2: anisotropic/best, higher computational overhead than linear, but provides the best visual quality
-# scale_quality=0
+scale_quality=1
 
 # === Directories to Ignore during packaging ===
 # A comma delimited list of directories that should be ignored during the
