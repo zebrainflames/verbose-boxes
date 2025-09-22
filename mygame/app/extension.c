@@ -1,8 +1,10 @@
+#include "collision.h"
 #include "math_functions.h"
 #include "mruby.h"
 #include "mruby/boxing_word.h"
 #include "mruby/value.h"
 #include <assert.h>
+#include <stdbool.h>
 #include <dragonruby.h>
 #include <mruby/array.h>
 #include <mruby/data.h>
@@ -39,6 +41,7 @@ static const float PIXELS_PER_METER = 32.0f; // NOTE: this still needs some tuni
 
 // global game-specific physics state
 static b2WorldDef mainWorldDef;
+static b2WorldId* main_world_ptr; // this might not be exactly safe...
 static Uint32 current_tick = 0;
 static Uint32 prev_tick = 0;
 
@@ -81,6 +84,7 @@ static void b2WorldId_free(mrb_state *mrb, void *p) {
 	b2WorldId *id = (b2WorldId *)p;
 	b2DestroyWorld(*id);
 	*id = b2_nullWorldId;
+	main_world_ptr = NULL;
 	drb_api->mrb_free(mrb, p);
 }
 
@@ -90,7 +94,15 @@ static const struct mrb_data_type b2WorldId_type = {
 };
 
 static void b2BodyId_free(mrb_state *mrb, void *p) {
+	if (!p) {
+		printf("WARNING: Tried to free a null b2BodyId & buc!\n");
+		return;
+	}
 	b2BodyId *bodyId = (b2BodyId *)p;
+	if (!b2Body_IsValid(*bodyId)) {
+		printf("WARNING: Tried to free an invalid body!");
+		return; // TODO: this might lead to dangling bucs, but let's see how this behaves first
+	}
 	body_user_context *buc = (body_user_context *)b2Body_GetUserData(*bodyId);
 	if (buc) {
 		drb_api->mrb_free(mrb, buc);
@@ -447,6 +459,108 @@ int compare_shapes(const void *a, const void *b) {
 	return (shapeA->pos.x > shapeB->pos.x) - (shapeA->pos.x < shapeB->pos.x);
 }
 
+
+static bool internal_split_body(mrb_state* mrb, b2BodyId body_to_split, b2WorldId *world_id) {
+	if (B2_IS_NULL(body_to_split))
+		return false;
+	if (!b2Body_IsValid(body_to_split))
+		return false;
+	int shape_count = b2Body_GetShapeCount(body_to_split);
+	if (shape_count <= 1) {
+		return false; // NOTE: we could also just destroy 1 shape bodies here, or might want to assert this
+	}
+
+	body_user_context* buc = (body_user_context*)b2Body_GetUserData(body_to_split);
+	mrb_value ruby_obj = buc ? buc->body_obj : mrb_nil_value();
+
+	printf("body valid, preparing to split..\n");
+	b2Transform original_transform = b2Body_GetTransform(body_to_split);
+	float orig_angular_vel = b2Body_GetAngularVelocity(body_to_split);
+	b2Vec2 linear_velocity = b2Body_GetLinearVelocity(body_to_split);
+
+	//TODO: might crash here?
+	printf("reading shape ids; do VLAs work?\n");
+	b2ShapeId shape_ids[shape_count];
+	b2Body_GetShapes(body_to_split, shape_ids, shape_count);
+	// TODO: need a nice way to access body and shape def data from original shapes! Maybe store in world. world_user_context?
+	float default_friction = 0.5;
+	float default_restitution = 0.1f;
+	float default_density = 1.0f;
+	printf("iterating shapes..\n");
+	for (int i = 0; i < shape_count; i++) {
+		b2ShapeId orig_shape_id = shape_ids[i];
+		if (!b2Shape_IsValid(orig_shape_id)) continue;
+
+		printf("shape is valid...\n");
+		b2Polygon poly = b2Shape_GetPolygon(orig_shape_id);
+		b2Vec2 world_centroid = b2TransformPoint(original_transform, poly.centroid);
+
+		// TODO: share code with `world_create_body`
+		struct RClass* module = drb_api->mrb_module_get(mrb, "FFI");
+		module = drb_api->mrb_module_get_under(mrb, module, "Box2D");
+		struct RClass* body_class = drb_api->mrb_class_get_under(mrb, module, "Body");
+		mrb_value new_body_obj = drb_api->mrb_obj_new(mrb, body_class, 0, NULL);
+		
+		printf("New body object created...\n");
+		// create new body based on shape & orig body data
+		b2BodyDef body_def = b2DefaultBodyDef();
+		body_def.type = b2_dynamicBody;
+		body_def.position = world_centroid;
+		body_def.rotation = original_transform.q;
+		body_def.linearVelocity = linear_velocity;
+		body_def.angularVelocity = orig_angular_vel;
+
+		b2ShapeDef shapeDef = b2DefaultShapeDef();
+		shapeDef.density = default_density;
+		shapeDef.material.friction = default_friction;
+		shapeDef.material.restitution = default_restitution;
+		shapeDef.enableContactEvents = true;
+		shapeDef.enableSensorEvents = true;
+		shapeDef.filter.categoryBits = TETROMINO_BIT;
+		shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
+
+		printf("body and shape definitions created..\n");
+		body_user_context* buc = (body_user_context*)drb_api->mrb_malloc(mrb, sizeof(body_user_context));
+		buc->body_obj = new_body_obj;
+		buc->type = BODY_TYPE_REGULAR;
+		buc->collided = false;
+		body_def.userData = buc;
+
+		printf("creting body..\n");
+		b2BodyId new_body_id = b2CreateBody(*world_id, &body_def);
+
+		float hw_m = (poly.vertices[1].x - poly.vertices[0].x) / 2.0f;
+		float hh_m = (poly.vertices[2].y - poly.vertices[1].y) / 2.0f;
+		b2Polygon new_box = b2MakeBox(hw_m, hh_m);
+		printf("creating polygon shape..\n");
+		b2CreatePolygonShape(new_body_id, &shapeDef, &new_box);
+
+		printf("allocating body id pointer\n");
+		b2BodyId* new_body_id_ptr = (b2BodyId*)drb_api->mrb_malloc(mrb, sizeof(b2BodyId));
+		*new_body_id_ptr = new_body_id;
+		printf("linking ruby object...\n");
+		mrb_data_init(new_body_obj, new_body_id_ptr, &b2BodyId_type); // TODO: should we also add the new bodies to args.state.blocks ?? Return array of new objects from here?
+	}
+	printf("Destroying original body...\n");
+	
+	// TODO: how about reusing the 'finalizer'?
+	b2DestroyBody(body_to_split);
+	printf("Freeing BUC...\n");
+	if (buc) {
+		drb_api->mrb_free(mrb, buc);
+	}
+	if (!mrb_nil_p(ruby_obj)) {
+		b2BodyId *ptr = DATA_PTR(ruby_obj);
+		if (ptr) {
+			drb_api->mrb_free(mrb, ptr);
+		}
+
+		DATA_PTR(ruby_obj) = NULL;
+	}
+
+	return true;
+}
+
 // main raycasting function
 static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
@@ -545,9 +659,15 @@ static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 	}
 
 	mrb_value results = drb_api->mrb_ary_new(mrb);
+	int split_count = 0;
+	b2BodyId* bodies_to_split = NULL;
 	if (max_group_size >= min_hits) {
+		split_count = max_group_size;
+		bodies_to_split = malloc(sizeof(b2BodyId) * split_count);
 		for (int i = 0; i < max_group_size; ++i) {
+			b2BodyId bid = b2Shape_GetBody(largest_group_ids[i]);
 			b2DestroyShape(largest_group_ids[i], true);
+			bodies_to_split[i] = bid; // TODO: duplicate handling?
 
 			mrb_value hit_hash = drb_api->mrb_hash_new(mrb);
 			drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
@@ -557,7 +677,16 @@ static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 			drb_api->mrb_ary_push(mrb, results, hit_hash);
 		}
 	}
-
+	if (split_count > 0) {
+		for (int i = 0; i < split_count; i++) {
+			// TODO: this might still crash to duplicates...
+			bool split = internal_split_body(mrb, bodies_to_split[i], worldId);
+			printf("%s", split ? "body was split\n" : "body was *NOT* split\n");
+		}
+	}
+	if (bodies_to_split != NULL) {
+		free(bodies_to_split);
+	}
 	drb_api->mrb_free(mrb, vertically_aligned_positions);
 	drb_api->mrb_free(mrb, vertically_aligned_shape_ids);
 	return results;
