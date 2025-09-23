@@ -1,18 +1,19 @@
-* EXCEPTION:
-* ERROR:
-** method_missing: uniq
-** instance:       0
-** on class:       Integer
-** with modules:   [NumericDeprecated, ValueType, Comparable, Kernel]
-** with values:    0
-** given args:     [[]]
-** exception:      can't define singleton
-** backtrace:
-app/main.rb:257:in render
-app/main.rb:129:in tick
-app/main.rb:301:in tick
+* RELOAD EXCEPTION: ~require~ order might not be valid (or require statement may be missing).
+An uninitialized constant exception was thrown while files were being loaded. Make sure that your ~require~
+and ~require_relative~ statements are ordered correctly. To debug require load order put the following at the TOP of =app/main.rb=
 
+#+begin_src
+  # main.rb
+  # very first line
+  $gtk.debug_require!
+
+  # rest of require statements/code
+  require ...
+#+end_src
+* EXCEPTION THROWN:
+* ERROR: Exception while requiring app/main.rb.
+uninitialized constant FFI::Box2D
 ** Backtrace:
-*** app/main.rb:257:in render
-*** app/main.rb:129:in tick
-*** app/main.rb:301:in tick
+*** app/main.rb:57
+*** app/main.rb:55
+** Backtrace:

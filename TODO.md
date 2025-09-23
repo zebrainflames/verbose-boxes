@@ -3,16 +3,14 @@
 ## C Side (`extension.c`)
 
 1.  **`world_raycast` Naming:** The `world_raycast` function should be renamed to something more descriptive, like `world_check_clear_line`.
-2.  **Splitting Bodies:** When destroying shapes, the affected body should be split into multiple bodies (one body per each remaining shape). Shape positions and "masses" must not change. For example, an I-shape with one shape removed, leaving three remaining shapes, should be split into three separate, unconnected boxes.
 
 ## Ruby Side (`main.rb`)
 
 1.  **Improve Rendering:** Improve rendering of destroyed shapes to show a nice "puff" effect.
+2.  **Move game logic to Ruby:** Alternatively, we could define Shape classes as needed and move all the game logic implementation into the ruby side; i.e only leave the core raycasting in native code (and still call the func world_raycast); return shapes to Ruby; and determine all line clearing logic in ruby side (-> faster iteration, cleaner separation). 
 
 ## Current Issues and Future Work:
 
 1.  **`world_raycast` Naming:** The `world_raycast` function should be renamed to something more descriptive, like `world_check_clear_line`.
-2.  **Tolerance Values:** We need to experiment with different `vertical_tolerance` values.
-3.  **Angle Checks:** We should check that the bodies / their constituent shapes are roughly horizontal in orientation.
-4.  **Feel:** we should check what angles of horizontal rows are okay; now in the test level it's easy to create rows that _feel_ like they should be okay. Maybe a bit more raycasts?
-5.  **Bugs:** restart does not work after game over (immediate game over)
+2.  **Angle Checks:** We could check that the bodies / their constituent shapes are roughly horizontal in orientation.
+3.  **Feel:** we should check what angles of horizontal rows are okay; now in the test level it's easy to create rows that _feel_ like they should be okay. Maybe a bit more raycasts?

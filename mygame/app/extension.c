@@ -79,6 +79,7 @@ typedef struct {
 	bool collided;
 } body_user_context;
 
+//TODO: Do we also need to free all bodies / shapes to avoid leaks on ruby-held objects?
 static void b2WorldId_free(mrb_state *mrb, void *p) {
 	printf("[CExt] -- INFO: freeing Box2D world");
 	b2WorldId *id = (b2WorldId *)p;
@@ -136,20 +137,24 @@ static mrb_value world_initialize(mrb_state *mrb, mrb_value self) {
 static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
 	// printf("[CExt] -- INFO: Creating Body...\n");
-	mrb_value type_str;
-	mrb_float x, y;
-	mrb_bool allow_sleep = true;
-	drb_api->mrb_get_args(mrb, "Sff|b", &type_str, &x, &y, &allow_sleep);
+    mrb_value type_str;
+    mrb_float x, y;
+    mrb_bool allow_sleep = true;
+    mrb_float vx = 0.0, vy = 0.0, av = 0.0;
+    drb_api->mrb_get_args(mrb, "Sff|bfff", &type_str, &x, &y, &allow_sleep, &vx, &vy, &av);
 
-	struct RClass *module = drb_api->mrb_module_get(mrb, "FFI");
-	module = drb_api->mrb_module_get_under(mrb, module, "Box2D");
-	struct RClass *body_class = drb_api->mrb_class_get_under(mrb, module, "Body");
-	mrb_value body_obj = drb_api->mrb_obj_new(mrb, body_class, 0, NULL);
+    struct RClass *module = drb_api->mrb_module_get(mrb, "FFI");
+    module = drb_api->mrb_module_get_under(mrb, module, "Box2D");
+    struct RClass *body_class = drb_api->mrb_class_get_under(mrb, module, "Body");
+    mrb_value body_obj = drb_api->mrb_obj_new(mrb, body_class, 0, NULL);
 
-	drb_api->mrb_iv_set(mrb, body_obj, drb_api->mrb_intern_lit(mrb, "@contacts"), drb_api->mrb_ary_new(mrb));
+    drb_api->mrb_iv_set(mrb, body_obj, drb_api->mrb_intern_lit(mrb, "@contacts"), drb_api->mrb_ary_new(mrb));
 
-	b2BodyDef bodyDef = b2DefaultBodyDef();
-	bodyDef.position = pixels_to_meters(x, y);
+    b2BodyDef bodyDef = b2DefaultBodyDef();
+    bodyDef.position = pixels_to_meters(x, y);
+    b2Vec2 linear_vel_meters = pixels_to_meters(vx, vy);
+    bodyDef.linearVelocity = linear_vel_meters;
+    bodyDef.angularVelocity = av * DEGTORAD;
 
 	body_user_context *holder = (body_user_context *)drb_api->mrb_malloc(mrb, sizeof(body_user_context));
 	holder->body_obj = body_obj;
@@ -459,115 +464,13 @@ int compare_shapes(const void *a, const void *b) {
 	return (shapeA->pos.x > shapeB->pos.x) - (shapeA->pos.x < shapeB->pos.x);
 }
 
-
-static bool internal_split_body(mrb_state* mrb, b2BodyId body_to_split, b2WorldId *world_id) {
-	if (B2_IS_NULL(body_to_split))
-		return false;
-	if (!b2Body_IsValid(body_to_split))
-		return false;
-	int shape_count = b2Body_GetShapeCount(body_to_split);
-	if (shape_count <= 1) {
-		return false; // NOTE: we could also just destroy 1 shape bodies here, or might want to assert this
-	}
-
-	body_user_context* buc = (body_user_context*)b2Body_GetUserData(body_to_split);
-	mrb_value ruby_obj = buc ? buc->body_obj : mrb_nil_value();
-
-	printf("body valid, preparing to split..\n");
-	b2Transform original_transform = b2Body_GetTransform(body_to_split);
-	float orig_angular_vel = b2Body_GetAngularVelocity(body_to_split);
-	b2Vec2 linear_velocity = b2Body_GetLinearVelocity(body_to_split);
-
-	//TODO: might crash here?
-	printf("reading shape ids; do VLAs work?\n");
-	b2ShapeId shape_ids[shape_count];
-	b2Body_GetShapes(body_to_split, shape_ids, shape_count);
-	// TODO: need a nice way to access body and shape def data from original shapes! Maybe store in world. world_user_context?
-	float default_friction = 0.5;
-	float default_restitution = 0.1f;
-	float default_density = 1.0f;
-	printf("iterating shapes..\n");
-	for (int i = 0; i < shape_count; i++) {
-		b2ShapeId orig_shape_id = shape_ids[i];
-		if (!b2Shape_IsValid(orig_shape_id)) continue;
-
-		printf("shape is valid...\n");
-		b2Polygon poly = b2Shape_GetPolygon(orig_shape_id);
-		b2Vec2 world_centroid = b2TransformPoint(original_transform, poly.centroid);
-
-		// TODO: share code with `world_create_body`
-		struct RClass* module = drb_api->mrb_module_get(mrb, "FFI");
-		module = drb_api->mrb_module_get_under(mrb, module, "Box2D");
-		struct RClass* body_class = drb_api->mrb_class_get_under(mrb, module, "Body");
-		mrb_value new_body_obj = drb_api->mrb_obj_new(mrb, body_class, 0, NULL);
-		
-		printf("New body object created...\n");
-		// create new body based on shape & orig body data
-		b2BodyDef body_def = b2DefaultBodyDef();
-		body_def.type = b2_dynamicBody;
-		body_def.position = world_centroid;
-		body_def.rotation = original_transform.q;
-		body_def.linearVelocity = linear_velocity;
-		body_def.angularVelocity = orig_angular_vel;
-
-		b2ShapeDef shapeDef = b2DefaultShapeDef();
-		shapeDef.density = default_density;
-		shapeDef.material.friction = default_friction;
-		shapeDef.material.restitution = default_restitution;
-		shapeDef.enableContactEvents = true;
-		shapeDef.enableSensorEvents = true;
-		shapeDef.filter.categoryBits = TETROMINO_BIT;
-		shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
-
-		printf("body and shape definitions created..\n");
-		body_user_context* buc = (body_user_context*)drb_api->mrb_malloc(mrb, sizeof(body_user_context));
-		buc->body_obj = new_body_obj;
-		buc->type = BODY_TYPE_REGULAR;
-		buc->collided = false;
-		body_def.userData = buc;
-
-		printf("creting body..\n");
-		b2BodyId new_body_id = b2CreateBody(*world_id, &body_def);
-
-		float hw_m = (poly.vertices[1].x - poly.vertices[0].x) / 2.0f;
-		float hh_m = (poly.vertices[2].y - poly.vertices[1].y) / 2.0f;
-		b2Polygon new_box = b2MakeBox(hw_m, hh_m);
-		printf("creating polygon shape..\n");
-		b2CreatePolygonShape(new_body_id, &shapeDef, &new_box);
-
-		printf("allocating body id pointer\n");
-		b2BodyId* new_body_id_ptr = (b2BodyId*)drb_api->mrb_malloc(mrb, sizeof(b2BodyId));
-		*new_body_id_ptr = new_body_id;
-		printf("linking ruby object...\n");
-		mrb_data_init(new_body_obj, new_body_id_ptr, &b2BodyId_type); // TODO: should we also add the new bodies to args.state.blocks ?? Return array of new objects from here?
-	}
-	printf("Destroying original body...\n");
-	
-	// TODO: how about reusing the 'finalizer'?
-	b2DestroyBody(body_to_split);
-	printf("Freeing BUC...\n");
-	if (buc) {
-		drb_api->mrb_free(mrb, buc);
-	}
-	if (!mrb_nil_p(ruby_obj)) {
-		b2BodyId *ptr = DATA_PTR(ruby_obj);
-		if (ptr) {
-			drb_api->mrb_free(mrb, ptr);
-		}
-
-		DATA_PTR(ruby_obj) = NULL;
-	}
-
-	return true;
-}
-
-// main raycasting function
+// main line clear checking function - finds the shapes forming a suitable line at least `min_hits` long
 static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
 
 	mrb_float x1, y1, x2, y2;
 	mrb_int min_hits = 12;
-	mrb_float vertical_tolerance = 3.0f;
+	mrb_float vertical_tolerance = 6.0f;
 	mrb_float horizontal_tolerance = 32.0f * 1.2f;
 
 
@@ -583,9 +486,39 @@ static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 
 	b2World_CastRay(*worldId, p1, tr, filter, raycast_callback, &ray_collection);
 
-	if (ray_collection.count < min_hits) {
-		return drb_api->mrb_ary_new(mrb);
+	mrb_value results = drb_api->mrb_hash_new(mrb);
+	mrb_value bodies_to_split_ary = drb_api->mrb_ary_new(mrb);
+	mrb_value cleared_points_ary = drb_api->mrb_ary_new(mrb);
+
+	// TODO: The 'all_hits' array is for debugging purposes only and should be removed later for performance reasons.
+	mrb_value all_hits_ary = drb_api->mrb_ary_new(mrb);
+	drb_api->mrb_hash_set(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "all_hits")), all_hits_ary);
+
+	for (int i = 0; i < ray_collection.count; i++) {
+		b2ShapeId shape_id = ray_collection.hit_shapes[i];
+		if (!b2Shape_IsValid(shape_id)) continue;
+
+		b2BodyId body_id = b2Shape_GetBody(shape_id);
+		b2Transform transform = b2Body_GetTransform(body_id);
+		b2Polygon poly = b2Shape_GetPolygon(shape_id);
+		b2Vec2 world_centroid = b2TransformPoint(transform, poly.centroid);
+		b2Vec2 pixel_pos = meters_to_pixels(world_centroid.x, world_centroid.y);
+
+		mrb_value hit_hash = drb_api->mrb_hash_new(mrb);
+		drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
+						  drb_api->mrb_float_value(mrb, pixel_pos.x));
+		drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")),
+						  drb_api->mrb_float_value(mrb, pixel_pos.y));
+		drb_api->mrb_ary_push(mrb, all_hits_ary, hit_hash);
 	}
+
+	drb_api->mrb_hash_set(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "bodies_to_split")), bodies_to_split_ary);
+	drb_api->mrb_hash_set(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "cleared_points")), cleared_points_ary);
+
+	if (ray_collection.count < min_hits) {
+		return results;
+	}
+
 
 	b2Vec2 *positions = drb_api->mrb_malloc(mrb, sizeof(b2Vec2) * ray_collection.count);
 	b2ShapeId *shape_ids = drb_api->mrb_malloc(mrb, sizeof(b2ShapeId) * ray_collection.count);
@@ -634,7 +567,7 @@ static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 	if (aligned_count < min_hits) {
 		drb_api->mrb_free(mrb, vertically_aligned_positions);
 		drb_api->mrb_free(mrb, vertically_aligned_shape_ids);
-		return drb_api->mrb_ary_new(mrb);
+		return results; // Return empty hash
 	}
 
 	b2ShapeId *largest_group_ids = NULL;
@@ -658,40 +591,53 @@ static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 		largest_group_positions = &vertically_aligned_positions[current_group_start];
 	}
 
-	mrb_value results = drb_api->mrb_ary_new(mrb);
-	int split_count = 0;
-	b2BodyId* bodies_to_split = NULL;
 	if (max_group_size >= min_hits) {
-		split_count = max_group_size;
-		bodies_to_split = malloc(sizeof(b2BodyId) * split_count);
+		b2BodyId* unique_bodies = drb_api->mrb_malloc(mrb, sizeof(b2BodyId) * max_group_size);
+		int unique_body_count = 0;
+
+		int shapes_destroyed = 0;
 		for (int i = 0; i < max_group_size; ++i) {
 			b2BodyId bid = b2Shape_GetBody(largest_group_ids[i]);
+			bool found = false;
+			for (int j = 0; j < unique_body_count; j++) {
+				if (unique_bodies[j].index1 == bid.index1) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				unique_bodies[unique_body_count++] = bid;
+			}
+
+			// TODO: we should probably _NOT_ destroy any shapes here directly; what to do per shape destroyed depends on the case; we might destroy the last shape of a body?
 			b2DestroyShape(largest_group_ids[i], true);
-			bodies_to_split[i] = bid; // TODO: duplicate handling?
+			shapes_destroyed++;
 
 			mrb_value hit_hash = drb_api->mrb_hash_new(mrb);
 			drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
-								  drb_api->mrb_float_value(mrb, largest_group_positions[i].x));
+						  drb_api->mrb_float_value(mrb, largest_group_positions[i].x));
 			drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")),
-								  drb_api->mrb_float_value(mrb, largest_group_positions[i].y));
-			drb_api->mrb_ary_push(mrb, results, hit_hash);
+						  drb_api->mrb_float_value(mrb, largest_group_positions[i].y));
+			drb_api->mrb_ary_push(mrb, cleared_points_ary, hit_hash);
 		}
-	}
-	if (split_count > 0) {
-		for (int i = 0; i < split_count; i++) {
-			// TODO: this might still crash to duplicates...
-			bool split = internal_split_body(mrb, bodies_to_split[i], worldId);
-			printf("%s", split ? "body was split\n" : "body was *NOT* split\n");
+		assert(shapes_destroyed >= min_hits && "a minimum amount of min_hits shapes must be directly destroyed by any line clear!");
+
+		for (int i = 0; i < unique_body_count; i++) {
+			b2BodyId body_id = unique_bodies[i];
+			if (b2Body_IsValid(body_id)) {
+				body_user_context* buc = (body_user_context*)b2Body_GetUserData(body_id);
+				if (buc && !mrb_nil_p(buc->body_obj)) {
+					drb_api->mrb_ary_push(mrb, bodies_to_split_ary, buc->body_obj);
+				}
+			}
 		}
+		drb_api->mrb_free(mrb, unique_bodies);
 	}
-	if (bodies_to_split != NULL) {
-		free(bodies_to_split);
-	}
+
 	drb_api->mrb_free(mrb, vertically_aligned_positions);
 	drb_api->mrb_free(mrb, vertically_aligned_shape_ids);
 	return results;
 }
-
 static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
 
@@ -735,6 +681,25 @@ static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 	return mrb_nil_value();
 }
 
+static mrb_value body_destroy(mrb_state *mrb, mrb_value self) {
+    b2BodyId *bodyId_ptr = DATA_PTR(self);
+    if (bodyId_ptr && b2Body_IsValid(*bodyId_ptr)) {
+        b2BodyId bodyId = *bodyId_ptr;
+        body_user_context *buc = (body_user_context *)b2Body_GetUserData(bodyId);
+        if (buc) {
+            drb_api->mrb_free(mrb, buc);
+        }
+        b2DestroyBody(bodyId);
+    }
+
+    if (bodyId_ptr) {
+        drb_api->mrb_free(mrb, bodyId_ptr);
+    }
+    DATA_PTR(self) = NULL;
+
+    return mrb_nil_value();
+}
+
 static mrb_value body_has_collided(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	body_user_context *buc = (body_user_context *)b2Body_GetUserData(*bodyId);
@@ -748,10 +713,33 @@ static mrb_value body_get_info(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	b2Vec2 pos = b2Body_GetPosition(*bodyId);
 	b2Vec2 vel = b2Body_GetLinearVelocity(*bodyId);
+    float ang_vel = b2Body_GetAngularVelocity(*bodyId);
+    b2Rot rot = b2Body_GetRotation(*bodyId);
+    float angle = b2Rot_GetAngle(rot);
 	bool awake = b2Body_IsAwake(*bodyId);
-	char buffer[256];
-	snprintf(buffer, sizeof(buffer), "pos=(%f, %f), vel=(%f, %f), awake=%s", pos.x, pos.y, vel.x, vel.y, awake ? "true" : "false");
-	return drb_api->mrb_str_new_cstr(mrb, buffer);
+
+	mrb_value hash = drb_api->mrb_hash_new(mrb);
+
+    b2Vec2 pos_pixels = meters_to_pixels(pos.x, pos.y);
+    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
+                          drb_api->mrb_float_value(mrb, pos_pixels.x));
+    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")),
+                          drb_api->mrb_float_value(mrb, pos_pixels.y));
+
+    b2Vec2 vel_pixels = meters_to_pixels(vel.x, vel.y);
+    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "vx")),
+                          drb_api->mrb_float_value(mrb, vel_pixels.x));
+    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "vy")),
+                          drb_api->mrb_float_value(mrb, vel_pixels.y));
+
+    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "angle")),
+                          drb_api->mrb_float_value(mrb, angle * RAD2DEG));
+    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "angular_velocity")),
+                          drb_api->mrb_float_value(mrb, ang_vel * RAD2DEG));
+    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "awake")),
+                          mrb_bool_value(awake));
+
+	return hash;
 }
 
 static mrb_value body_is_awake(mrb_state *mrb, mrb_value self) {
@@ -913,6 +901,14 @@ static mrb_value body_set_rotation(mrb_state *mrb, mrb_value self) {
 	return mrb_nil_value();
 }
 
+static mrb_value body_set_angular_velocity(mrb_state *mrb, mrb_value self) {
+    b2BodyId *bodyId = DATA_PTR(self);
+    mrb_float velocity_deg_per_sec;
+    drb_api->mrb_get_args(mrb, "f", &velocity_deg_per_sec);
+    b2Body_SetAngularVelocity(*bodyId, velocity_deg_per_sec * DEGTORAD);
+    return mrb_nil_value();
+}
+
 static mrb_value body_apply_force_center(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 
@@ -1025,6 +1021,7 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	drb_api->mrb_define_method(state, Body, "get_shapes_info", body_get_shapes_info, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "angle", body_angle, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "angle=", body_set_rotation, MRB_ARGS_REQ(1));
+	drb_api->mrb_define_method(state, Body, "angular_velocity=", body_set_angular_velocity, MRB_ARGS_REQ(1));
 	drb_api->mrb_define_method(state, Body, "rotate", body_rotate, MRB_ARGS_REQ(1));
 	drb_api->mrb_define_method(state, Body, "apply_force_center", body_apply_force_center, MRB_ARGS_REQ(2));
 	drb_api->mrb_define_method(state, Body, "apply_impulse_center", body_apply_impulse_center, MRB_ARGS_REQ(2));
@@ -1032,6 +1029,7 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	drb_api->mrb_define_method(state, Body, "get_info", body_get_info, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "awake?", body_is_awake, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "collided?", body_has_collided, MRB_ARGS_NONE());
+	drb_api->mrb_define_method(state, Body, "destroy", body_destroy, MRB_ARGS_NONE());
 	// TODO: remove old contact mehods which aren't used anymore?
 	drb_api->mrb_define_method(state, Body, "contacts", body_get_contacts, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "sensor_contact_count", body_get_sensor_contact_count, MRB_ARGS_NONE());

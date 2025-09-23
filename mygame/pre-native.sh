@@ -59,4 +59,9 @@ mygame/lib/box2d/src/arena_allocator.c \
 mygame/lib/box2d/src/aabb.c \
   $OPTIMIZATION_FLAGS -o mygame/native/$PLATFORM/ext.$DLLEXT
 
+if [ $? -ne 0 ]; then
+  echo "Compilation failed."
+  exit 1
+fi
+
 echo "Done..!"

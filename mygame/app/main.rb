@@ -1,7 +1,6 @@
 module PhysicsHelpers
-  # Updated to accept allow_sleep
-  def create_body(args, type, x, y, allow_sleep: true)
-    args.state.world.create_body(type, x, y, allow_sleep)
+  def create_body(args, type, x, y, allow_sleep: true, vx: 0.0, vy: 0.0, angular_velocity: 0.0)
+    args.state.world.create_body(type, x, y, allow_sleep, vx, vy, angular_velocity)
   end
 
   def create_sensor_box(args, x, y, w, h)
@@ -10,9 +9,9 @@ module PhysicsHelpers
     body
   end
 
-  def create_dynamic_box(args, x, y, w, h, density: 1.0, contacts: false, allow_sleep: true)
-    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep)
-    body.create_box_shape(w, h, density, contacts)
+  def create_dynamic_box(args, x, y, w, h, density: 1.0, contacts: false, allow_sleep: true, vx: 0.0, vy: 0.0, angular_velocity: 0.0)
+    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep, vx: vx, vy: vy, angular_velocity: angular_velocity)
+    body.create_box_shape(w, h, density, 0.5, 0.1, contacts)
     body
   end
 
@@ -58,61 +57,15 @@ class Game
   attr_accessor :active_block
   attr_reader :args, :block_types
 
-  def reset_game
-    # Reset dynamic game state and frame counters to a known baseline
-    args.state.blocks = []
-    @active_block = nil
-    args.state.paused = false
-    args.state.game_over = false
 
-    # Frame/cycle counters and timers
-    @spawn_collision_check_frames = 0
-    @lock_delay_frames = 8
-    @spawn_delay_frames = 45
-    @touching_frames = 0
-    @pending_spawn_frames = 0 # trigger initial spawn via countdown
-    @last_spawned_block = nil
-  end
-
-  def initialize(args)
-    @args = args
-    @block_types = [:create_t_block, :create_o_block, :create_l_block, :create_j_block, :create_i_block]
-    @colors = ['violet', 'orange', 'blue', 'green', 'red', 'yellow'] # 'yellow', 'red'
-    @pastel_colors = {
-      # r, g, b, a
-      'violet' => [200, 160, 220],
-      'yellow' => [253, 253, 150],
-      'orange' => [255, 204, 153],
-      'blue'   => [173, 216, 230],
-      'red'    => [255, 153, 153],
-      'green'  => [153, 255, 153]
-    }
-    @active_block = nil
-    @all_shapes_hit = []
-  end
-
-  def setup
-    args.state.world = FFI::Box2D::World.new
-    
-    # Create terrain
-    terrain_points = [
-      { x: 1280, y: 180 },
-      { x: 1000, y: 200 },
-      { x: 800, y: 160 },
-      { x: 600, y: 180 },
-      { x: 400, y: 120 },
-      { x: 200, y: 150 },
-      { x: 0, y: 100 }
-    ]
-    
+  # Reset dynamic game state and frame counters to a known baseline
+  def reset_game_state
+    args.state.world = World.new
     args.state.ground = create_body(args, 'static', 0, 0)
-    args.state.ground.create_chain_shape(terrain_points, false)
+    args.state.ground.create_chain_shape(args.state.levels.level1.terrain_points, false)
 
-    args.state.blocks ||= []
-    args.state.paused = false
-
-
-    # rendering setup; RTs etc.
+    # rendering setup
+    unless @static_assets_setup
     args.render_target(:static_elements).w = args.grid.w
     args.render_target(:static_elements).h = args.grid.h
     args.render_target(:static_elements).background_color = [0, 0, 0, 0]
@@ -140,12 +93,73 @@ class Game
         a: 220
       }
     end
+    @static_assets_setup = true
+    end
 
-    # TODO: flag these options somehow
+    args.state.blocks = []
+    #args.state.world.clear
+    @active_block = nil
+    args.state.paused = false
+    args.state.game_over = false
+
+    # Frame/cycle counters and timers
+    @spawn_collision_check_frames = 0
+    @lock_delay_frames = 8
+    @spawn_delay_frames = 45
+    @touching_frames = 0
+    @pending_spawn_frames = 0 # trigger initial spawn via countdown
+    @last_spawned_block = nil
+  end
+
+  def initialize(args)
+    @args = args
+    @block_types = [:create_t_block, :create_o_block, :create_l_block, :create_j_block, :create_i_block]
+    @colors = ['violet', 'orange', 'blue', 'green', 'red', 'yellow'] # 'yellow', 'red'
+    @pastel_colors = {
+      'violet' => [200, 160, 220],
+      'yellow' => [253, 253, 150],
+      'orange' => [255, 204, 153],
+      'blue'   => [173, 216, 230],
+      'red'    => [255, 153, 153],
+      'green'  => [153, 255, 153]
+    }
+    @active_block = nil
+    @all_shapes_hit = []
+    @all_raycast_hits = []
+    @debug_colors = [
+      [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [0, 255, 255],
+      [255, 0, 255], [192, 192, 192], [128, 128, 128], [128, 0, 0], [128, 128, 0],
+      [0, 128, 0], [128, 0, 128], [0, 128, 128], [0, 0, 128], [255, 165, 0],
+      [255, 215, 0], [184, 134, 11], [218, 165, 32], [255, 250, 205], [255, 228, 181]
+    ]
+  end
+
+  def setup
+    # level data should be loaded from somewhere else...
+    args.state.levels = {level1: { terrain_points: nil, target_score: 10, current: true } }
+    args.state.levels.level1.terrain_points = [
+      { x: 1280, y: 180 },
+      { x: 1000, y: 200 },
+      { x: 800, y: 160 },
+      { x: 600, y: 180 },
+      { x: 400, y: 120 },
+      { x: 200, y: 150 },
+      { x: 0, y: 100 }
+    ]
+    
+   
+
+    args.state.blocks ||= []
+    args.state.paused = false
+
+
+    # rendering setup; RTs etc.
+    
+
     args.state.profile ||= false
 
     # Ensure dynamic game state is reset to a known baseline (including counters)
-    reset_game
+    reset_game_state
   end
 
   def tick
@@ -161,7 +175,7 @@ class Game
 
     if args.state.game_over
       if args.inputs.keyboard.key_down.r || args.inputs.keyboard.key_down.enter || args.inputs.keyboard.key_down.space
-        reset_game
+        reset_game_state
       end
       return
     end
@@ -204,7 +218,6 @@ class Game
       if @active_block.body.collided?
         @touching_frames += 1
         if @touching_frames >= @lock_delay_frames
-          # On lock, release control and start spawn delay
           @active_block.body.apply_impulse_for_velocity(0.0, -2.4)
           @active_block = nil
           @touching_frames = 0
@@ -228,8 +241,9 @@ class Game
     end
 
     # post-physics step: check for immediate collision of just spawned block
-    if @spawn_collision_check_frames.to_i > 0 && @last_spawned_block
+    if @spawn_collision_check_frames > 0 && @last_spawned_block
       if @last_spawned_block.body.collided?
+        putz "Last spawned block immediatelly collided!"
         args.state.game_over = true
       end
       @spawn_collision_check_frames -= 1
@@ -241,21 +255,60 @@ class Game
     check_for_cleared_lines
 
     # post-update cleanup
+    # NOTE: this is a separate block instead of combined mainly to track if this condition happens in game
+    args.state.blocks.reject! do |block|
+      empty = block.body.get_shapes_info.empty?
+      puts "Block with no shapes removed!" if empty
+      empty
+    end
     # NOTE: this could affect scoring as well? Minus points on blocks "lost" ?
     args.state.blocks.reject! do |block|
-      block[:body].position[:y] < -100 || block[:body].get_shapes_info.empty?
+      block[:body].position[:y] < -100 
     end
   end
 
+  def split_body(block_info)
+    original_body = block_info[:body]
+    info = original_body.get_info
+    remaining_shapes = original_body.get_shapes_info
+
+    if remaining_shapes.any?
+      angle_rad = info[:angle] * (Math::PI / 180.0)
+      cos_a = Math.cos(angle_rad)
+      sin_a = Math.sin(angle_rad)
+
+      remaining_shapes.each do |shape|
+        # Calculate world position of the new body from the shape's relative position
+        rotated_x = shape[:x] * cos_a - shape[:y] * sin_a
+        rotated_y = shape[:x] * sin_a + shape[:y] * cos_a
+        new_x = info[:x] + rotated_x
+        new_y = info[:y] + rotated_y
+
+        # Create a new body for the shape, passing initial velocities
+        new_body = create_dynamic_box(args, new_x, new_y, shape[:w], shape[:h],
+                                      vx: info[:vx], vy: info[:vy], angular_velocity: info[:angular_velocity])
+
+        # Add to game state
+        args.state.blocks << { body: new_body, color: block_info[:color] }      end
+    end
+
+    # Destroy original body and remove from game state
+    original_body.destroy
+    args.state.blocks.delete(block_info)
+  end
+
   def check_for_cleared_lines
-    scan_area = { x: 200, y: 100, w: 880, h: 400 }
+    scan_area = { x: 200, y: 100, w: 880, h: 400 } # TODO: this should probably come from level data
     num_rays = 20
     min_hits = 6
-    vertical_tolerance = 8.0 # TODO: less magic numbers, use block size or something
-    horiztonal_tolerance = 1.2 * 32.0
+    vertical_tolerance = 10.0 # TODO: less magic numbers, use block size or something
+    horiztonal_tolerance = 1.4 * 32.0
 
     @raycast_y_coords = []
-    @all_shapes_hit = []
+    @cleared_shape_origins = []
+    @all_raycast_hits = []
+
+    total_bodies_to_split = []
 
     num_rays.times do |i|
       ray_y = scan_area.y + (scan_area.h / num_rays) * i
@@ -263,8 +316,21 @@ class Game
       ray_start_x = scan_area.x
       ray_end_x = scan_area.x + scan_area.w
 
-      shapes_hit = args.state.world.raycast(ray_start_x, ray_y, ray_end_x, ray_y, min_hits, vertical_tolerance, horiztonal_tolerance)
-      @all_shapes_hit.concat(shapes_hit)
+      raycast_results = args.state.world.raycast(ray_start_x, ray_y, ray_end_x, ray_y, min_hits, vertical_tolerance, horiztonal_tolerance)
+      next if raycast_results.empty?
+
+      @cleared_shape_origins.concat(raycast_results[:cleared_points])
+      total_bodies_to_split.concat(raycast_results[:bodies_to_split])
+
+      color_index = i % @debug_colors.size
+      @all_raycast_hits << { points: raycast_results[:all_hits], color_index: color_index }
+    end
+
+    total_bodies_to_split.uniq! # Process each affected body only once
+
+    total_bodies_to_split.each do |body_to_split|
+      block_info = args.state.blocks.find { |b| b[:body] == body_to_split }
+      split_body(block_info) if block_info
     end
   end
 
@@ -288,7 +354,6 @@ class Game
     sprites = []
     labels = []
 
-    # render the pre-baked background, ground and other baked render targets / static elements
     sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :static_elements }
 
     # NOTE: this is quite heavy atm and could do with a bunch of optimization
@@ -331,19 +396,24 @@ class Game
       end
     end
 
+    @all_raycast_hits.each do |hit_group|
+      color = @debug_colors[hit_group[:color_index]]
+      hit_group[:points].each do |p|
+        sprites << { x: p.x, y: p.y, w: 5, h: 5, path: :pixel, r: color[0], g: color[1], b: color[2], a: 200, anchor_x: 0.5, anchor_y: 0.5 }
+      end
+    end
 
-
-    @all_shapes_hit.each do |s|
+    @cleared_shape_origins.each do |s|
         sprites << { x: s.x, y: s.y, w: 12, h: 12, path: :pixel, r:153, g:255, b:153, a:255, anchor_x: 0.5, anchor_y: 0.5 }
     end
 
     sleeping_blocks = args.state.blocks.size - args.state.blocks.count { |b| b.body.awake? }
     labels << { alignment_enum: 1, font: 'fonts/dirty_harold/dirty_harold.ttf', x: args.grid.w / 2.0,
                 y: args.grid.h - 10, r: 20, g: 20, b: 20, 
-                text: "FPS: #{args.gtk.current_framerate.round} | Blocks: #{args.state.blocks.count} Sleeping blocks: #{sleeping_blocks}"}
+                text: "FPS: " + args.gtk.current_framerate.round.to_s + " | Blocks: " + args.state.blocks.count.to_s + " Sleeping blocks: " + sleeping_blocks.to_s}
 
     labels << { alignment_enum: 1, font: 'fonts/dirty_harold/dirty_harold.ttf', x: args.grid.w / 2.0, y: 40.from_top,
-                r: 20, g: 20, b: 20, text: "Active block collided: #{@active_block.body.collided?}"} if @active_block
+                r: 20, g: 20, b: 20, text: "Active block collided: " + @active_block.body.collided?.to_s} if @active_block
 
     if args.state.paused
       sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :pixel, r: 0, g: 0, b: 0, a: 150 }
@@ -380,6 +450,7 @@ end
 def tick(args)
   unless args.state.game
     GTK.ffi_misc.gtk_dlopen('ext')
+    include FFI::Box2D
     $game = Game.new(args)
     args.state.game = $game
     $game.setup
