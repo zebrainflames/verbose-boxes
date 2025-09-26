@@ -66,34 +66,34 @@ class Game
 
     # rendering setup
     unless @static_assets_setup
-    args.render_target(:static_elements).w = args.grid.w
-    args.render_target(:static_elements).h = args.grid.h
-    args.render_target(:static_elements).background_color = [0, 0, 0, 0]
-    args.render_target(:static_elements).sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: 'sprites/ignored/paper_texture2.jpg', a: 180 }
-    ground_shapes = args.state.ground.get_shapes_info
-    ground_shapes.each do |shape|
-      p1 = { x: shape[:x1], y: shape[:y1] }
-      p2 = { x: shape[:x2], y: shape[:y2] }
+      args.render_target(:static_elements).w = args.grid.w
+      args.render_target(:static_elements).h = args.grid.h
+      args.render_target(:static_elements).background_color = [0, 0, 0, 0]
+      args.render_target(:static_elements).sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: 'sprites/ignored/paper_texture2.jpg', a: 180 }
+      ground_shapes = args.state.ground.get_shapes_info
+      ground_shapes.each do |shape|
+        p1 = { x: shape[:x1], y: shape[:y1] }
+        p2 = { x: shape[:x2], y: shape[:y2] }
 
-      angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * (180 / Math::PI)
-      length = Math.sqrt((p2.x - p1.x)**2 + (p2.y - p1.y)**2)
+        angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * (180 / Math::PI)
+        length = Math.sqrt((p2.x - p1.x)**2 + (p2.y - p1.y)**2)
 
-      mx = (p1.x + p2.x) / 2.0
-      my = (p1.y + p2.y) / 2.0
+        mx = (p1.x + p2.x) / 2.0
+        my = (p1.y + p2.y) / 2.0
 
-      args.render_target(:static_elements).sprites << {
-        x: mx,
-        y: my,
-        w: length,
-        h: 12, # Height of the texture
-        path: 'sprites/line_test.png',
-        angle: angle,
-        anchor_x: 0.5,
-        anchor_y: 0.5,
-        a: 220
-      }
-    end
-    @static_assets_setup = true
+        args.render_target(:static_elements).sprites << {
+          x: mx,
+          y: my,
+          w: length,
+          h: 12, # Height of the texture
+          path: 'sprites/line_test.png',
+          angle: angle,
+          anchor_x: 0.5,
+          anchor_y: 0.5,
+          a: 220
+        }
+      end
+      @static_assets_setup = true
     end
 
     args.state.blocks = []
@@ -146,19 +146,12 @@ class Game
       { x: 200, y: 150 },
       { x: 0, y: 100 }
     ]
-    
-   
 
     args.state.blocks ||= []
     args.state.paused = false
 
-
-    # rendering setup; RTs etc.
-    
-
     args.state.profile ||= false
 
-    # Ensure dynamic game state is reset to a known baseline (including counters)
     reset_game_state
   end
 
@@ -263,7 +256,7 @@ class Game
     end
     # NOTE: this could affect scoring as well? Minus points on blocks "lost" ?
     args.state.blocks.reject! do |block|
-      block[:body].position[:y] < -100 
+      block.body.position.y < -100 
     end
   end
 
@@ -319,11 +312,13 @@ class Game
       raycast_results = args.state.world.raycast(ray_start_x, ray_y, ray_end_x, ray_y, min_hits, vertical_tolerance, horiztonal_tolerance)
       next if raycast_results.empty?
 
-      @cleared_shape_origins.concat(raycast_results[:cleared_points])
-      total_bodies_to_split.concat(raycast_results[:bodies_to_split])
+      @cleared_shape_origins.concat raycast_results.cleared_points
+      total_bodies_to_split.concat raycast_results.bodies_to_split
 
-      color_index = i % @debug_colors.size
-      @all_raycast_hits << { points: raycast_results[:all_hits], color_index: color_index }
+      if args.state.profile
+        color_index = i % @debug_colors.size
+        @all_raycast_hits << { points: raycast_results.all_hits, color_index: color_index } 
+      end
     end
 
     total_bodies_to_split.uniq! # Process each affected body only once

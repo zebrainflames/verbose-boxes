@@ -1,19 +1,22 @@
-* RELOAD EXCEPTION: ~require~ order might not be valid (or require statement may be missing).
-An uninitialized constant exception was thrown while files were being loaded. Make sure that your ~require~
-and ~require_relative~ statements are ordered correctly. To debug require load order put the following at the TOP of =app/main.rb=
+* EXCEPTION:
+* ERROR - :concat method missing on ~NilClass~.
 
-#+begin_src
-  # main.rb
-  # very first line
-  $gtk.debug_require!
+#+begin_src ~NilClass#inspect~
+nil
+#+end_src ~NilClass#inspect~
 
-  # rest of require statements/code
-  require ...
-#+end_src
-* EXCEPTION THROWN:
-* ERROR: Exception while requiring app/main.rb.
-uninitialized constant FFI::Box2D
+
+
+The method named
+  :concat
+with args
+  [[]]
+doesn't exist on [NilClass, NilClassFalseClass, FFI::Box2D].
+
+(suggestions above)
 ** Backtrace:
-*** app/main.rb:57
-*** app/main.rb:55
-** Backtrace:
+*** app/main.rb:316:in check_for_cleared_lines
+*** app/main.rb:306:in check_for_cleared_lines
+*** app/main.rb:248:in update
+*** app/main.rb:161:in tick
+*** app/main.rb:454:in tick

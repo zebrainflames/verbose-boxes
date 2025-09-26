@@ -4,12 +4,12 @@
 #include "mruby/boxing_word.h"
 #include "mruby/value.h"
 #include <assert.h>
-#include <stdbool.h>
 #include <dragonruby.h>
 #include <mruby/array.h>
 #include <mruby/data.h>
 #include <mruby/proc.h>
 #include <mruby/variable.h>
+#include <stdbool.h>
 #include <string.h>
 
 // testing box2d includes:
@@ -41,7 +41,7 @@ static const float PIXELS_PER_METER = 32.0f; // NOTE: this still needs some tuni
 
 // global game-specific physics state
 static b2WorldDef mainWorldDef;
-static b2WorldId* main_world_ptr; // this might not be exactly safe...
+static b2WorldId *main_world_ptr; // this might not be exactly safe...
 static Uint32 current_tick = 0;
 static Uint32 prev_tick = 0;
 
@@ -79,7 +79,7 @@ typedef struct {
 	bool collided;
 } body_user_context;
 
-//TODO: Do we also need to free all bodies / shapes to avoid leaks on ruby-held objects?
+// TODO: Do we also need to free all bodies / shapes to avoid leaks on ruby-held objects?
 static void b2WorldId_free(mrb_state *mrb, void *p) {
 	printf("[CExt] -- INFO: freeing Box2D world");
 	b2WorldId *id = (b2WorldId *)p;
@@ -137,24 +137,24 @@ static mrb_value world_initialize(mrb_state *mrb, mrb_value self) {
 static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
 	// printf("[CExt] -- INFO: Creating Body...\n");
-    mrb_value type_str;
-    mrb_float x, y;
-    mrb_bool allow_sleep = true;
-    mrb_float vx = 0.0, vy = 0.0, av = 0.0;
-    drb_api->mrb_get_args(mrb, "Sff|bfff", &type_str, &x, &y, &allow_sleep, &vx, &vy, &av);
+	mrb_value type_str;
+	mrb_float x, y;
+	mrb_bool allow_sleep = true;
+	mrb_float vx = 0.0, vy = 0.0, av = 0.0;
+	drb_api->mrb_get_args(mrb, "Sff|bfff", &type_str, &x, &y, &allow_sleep, &vx, &vy, &av);
 
-    struct RClass *module = drb_api->mrb_module_get(mrb, "FFI");
-    module = drb_api->mrb_module_get_under(mrb, module, "Box2D");
-    struct RClass *body_class = drb_api->mrb_class_get_under(mrb, module, "Body");
-    mrb_value body_obj = drb_api->mrb_obj_new(mrb, body_class, 0, NULL);
+	struct RClass *module = drb_api->mrb_module_get(mrb, "FFI");
+	module = drb_api->mrb_module_get_under(mrb, module, "Box2D");
+	struct RClass *body_class = drb_api->mrb_class_get_under(mrb, module, "Body");
+	mrb_value body_obj = drb_api->mrb_obj_new(mrb, body_class, 0, NULL);
 
-    drb_api->mrb_iv_set(mrb, body_obj, drb_api->mrb_intern_lit(mrb, "@contacts"), drb_api->mrb_ary_new(mrb));
+	drb_api->mrb_iv_set(mrb, body_obj, drb_api->mrb_intern_lit(mrb, "@contacts"), drb_api->mrb_ary_new(mrb));
 
-    b2BodyDef bodyDef = b2DefaultBodyDef();
-    bodyDef.position = pixels_to_meters(x, y);
-    b2Vec2 linear_vel_meters = pixels_to_meters(vx, vy);
-    bodyDef.linearVelocity = linear_vel_meters;
-    bodyDef.angularVelocity = av * DEGTORAD;
+	b2BodyDef bodyDef = b2DefaultBodyDef();
+	bodyDef.position = pixels_to_meters(x, y);
+	b2Vec2 linear_vel_meters = pixels_to_meters(vx, vy);
+	bodyDef.linearVelocity = linear_vel_meters;
+	bodyDef.angularVelocity = av * DEGTORAD;
 
 	body_user_context *holder = (body_user_context *)drb_api->mrb_malloc(mrb, sizeof(body_user_context));
 	holder->body_obj = body_obj;
@@ -390,7 +390,7 @@ static mrb_value body_create_i_shape(mrb_state *mrb, mrb_value self) {
 	shapeDef.filter.categoryBits = TETROMINO_BIT;
 	shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
 
-    float half = square_size_px / 2.0f;
+	float half = square_size_px / 2.0f;
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -half - square_size_px, 0);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, half + square_size_px, 0);
 	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, half, 0);
@@ -464,15 +464,31 @@ int compare_shapes(const void *a, const void *b) {
 	return (shapeA->pos.x > shapeB->pos.x) - (shapeA->pos.x < shapeB->pos.x);
 }
 
-// main line clear checking function - finds the shapes forming a suitable line at least `min_hits` long
+typedef struct {
+	b2ShapeId shape_id;
+	b2Vec2 world_pos_pixels;
+} line_hit;
+
+// Comparison function for qsort to sort hits by their X-coordinate
+static int compare_hits_by_x(const void *a, const void *b) {
+	line_hit *hit_a = (line_hit *)a;
+	line_hit *hit_b = (line_hit *)b;
+	if (hit_a->world_pos_pixels.x < hit_b->world_pos_pixels.x)
+		return -1;
+	if (hit_a->world_pos_pixels.x > hit_b->world_pos_pixels.x)
+		return 1;
+	return 0;
+}
+
+// main line clear checking function - finds the shapes forming a suitable line at least `min_hits` long, return shape origins in world
+// pixel space (for effects) and list of affected bodies NOTE: unlike the rest of the C code, this is very much about game logic; could
+// perhaps rather be done in Ruby
 static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
-
 	mrb_float x1, y1, x2, y2;
-	mrb_int min_hits = 12;
+	mrb_int min_hits = 6;
 	mrb_float vertical_tolerance = 6.0f;
 	mrb_float horizontal_tolerance = 32.0f * 1.2f;
-
 
 	drb_api->mrb_get_args(mrb, "ffff|iff", &x1, &y1, &x2, &y2, &min_hits, &vertical_tolerance, &horizontal_tolerance);
 
@@ -487,145 +503,136 @@ static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 	b2World_CastRay(*worldId, p1, tr, filter, raycast_callback, &ray_collection);
 
 	mrb_value results = drb_api->mrb_hash_new(mrb);
-	mrb_value bodies_to_split_ary = drb_api->mrb_ary_new(mrb);
-	mrb_value cleared_points_ary = drb_api->mrb_ary_new(mrb);
+	drb_api->mrb_hash_set(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "bodies_to_split")),
+						  drb_api->mrb_ary_new(mrb));
+	drb_api->mrb_hash_set(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "cleared_points")),
+						  drb_api->mrb_ary_new(mrb));
 
-	// TODO: The 'all_hits' array is for debugging purposes only and should be removed later for performance reasons.
+	// DEBUG: All raycast hits are returned for debug purposes (display on Ruby side)
 	mrb_value all_hits_ary = drb_api->mrb_ary_new(mrb);
 	drb_api->mrb_hash_set(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "all_hits")), all_hits_ary);
-
-	for (int i = 0; i < ray_collection.count; i++) {
-		b2ShapeId shape_id = ray_collection.hit_shapes[i];
-		if (!b2Shape_IsValid(shape_id)) continue;
-
-		b2BodyId body_id = b2Shape_GetBody(shape_id);
-		b2Transform transform = b2Body_GetTransform(body_id);
-		b2Polygon poly = b2Shape_GetPolygon(shape_id);
-		b2Vec2 world_centroid = b2TransformPoint(transform, poly.centroid);
-		b2Vec2 pixel_pos = meters_to_pixels(world_centroid.x, world_centroid.y);
-
-		mrb_value hit_hash = drb_api->mrb_hash_new(mrb);
-		drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
-						  drb_api->mrb_float_value(mrb, pixel_pos.x));
-		drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")),
-						  drb_api->mrb_float_value(mrb, pixel_pos.y));
-		drb_api->mrb_ary_push(mrb, all_hits_ary, hit_hash);
-	}
-
-	drb_api->mrb_hash_set(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "bodies_to_split")), bodies_to_split_ary);
-	drb_api->mrb_hash_set(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "cleared_points")), cleared_points_ary);
 
 	if (ray_collection.count < min_hits) {
 		return results;
 	}
 
-
-	b2Vec2 *positions = drb_api->mrb_malloc(mrb, sizeof(b2Vec2) * ray_collection.count);
-	b2ShapeId *shape_ids = drb_api->mrb_malloc(mrb, sizeof(b2ShapeId) * ray_collection.count);
+	line_hit *candidates = drb_api->mrb_malloc(mrb, sizeof(line_hit) * ray_collection.count);
+	int candidate_count = 0;
 	float total_y = 0;
-	int added_shapes = 0; // should be called "stationary shape count" or smth
+	const float max_velocity_sq = 0.01f * 0.01f;
 
-	const float max_velocity = 0.01f; // TODO: tune this value...
-
+	// we filter hits by velocity and alignment to try to only match relatively stable horizontal lines
 	for (int i = 0; i < ray_collection.count; ++i) {
 		b2ShapeId shape_id = ray_collection.hit_shapes[i];
-		b2BodyId body_id = b2Shape_GetBody(shape_id);
+		if (!b2Shape_IsValid(shape_id))
+			continue;
 
-		// we ignore moving blocks entirely
-		b2Vec2 velocity = b2Body_GetLinearVelocity(body_id);
-		if (b2LengthSquared(velocity) > max_velocity) {
+		b2BodyId body_id = b2Shape_GetBody(shape_id);
+		if (b2LengthSquared(b2Body_GetLinearVelocity(body_id)) > max_velocity_sq) {
 			continue;
 		}
 
-		b2Polygon poly = b2Shape_GetPolygon(shape_id);
-		b2Vec2 local_pos = poly.centroid;
 		b2Transform transform = b2Body_GetTransform(body_id);
-		b2Vec2 pos = b2TransformPoint(transform, local_pos);
+		b2Polygon poly = b2Shape_GetPolygon(shape_id);
+		b2Vec2 world_pos_meters = b2TransformPoint(transform, poly.centroid);
 
-		positions[added_shapes] = meters_to_pixels(pos.x, pos.y);
-		shape_ids[added_shapes] = shape_id;
-		total_y += positions[added_shapes].y;
-		added_shapes++;
+		b2Vec2 pixel_pos = meters_to_pixels(world_pos_meters.x, world_pos_meters.y);
+
+		// DEBUG: populating the all_hits array in `results`
+		mrb_value hit_hash = drb_api->mrb_hash_new(mrb);
+		drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
+							  drb_api->mrb_float_value(mrb, pixel_pos.x));
+		drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")),
+							  drb_api->mrb_float_value(mrb, pixel_pos.y));
+		drb_api->mrb_ary_push(mrb, all_hits_ary, hit_hash);
+
+		candidates[candidate_count].shape_id = shape_id;
+		candidates[candidate_count].world_pos_pixels = pixel_pos;
+		total_y += candidates[candidate_count].world_pos_pixels.y;
+		candidate_count++;
 	}
 
-	float avg_y = total_y / added_shapes;
-	b2Vec2 *vertically_aligned_positions = drb_api->mrb_malloc(mrb, sizeof(b2Vec2) * added_shapes);
-	b2ShapeId *vertically_aligned_shape_ids = drb_api->mrb_malloc(mrb, sizeof(b2ShapeId) * added_shapes);
-	int aligned_count = 0;
+	if (candidate_count < min_hits) {
+		drb_api->mrb_free(mrb, candidates);
+		return results;
+	}
 
-	for (int i = 0; i < added_shapes; ++i) {
-		if (fabs(positions[i].y - avg_y) < vertical_tolerance) {
-			vertically_aligned_positions[aligned_count] = positions[i];
-			vertically_aligned_shape_ids[aligned_count] = shape_ids[i];
-			aligned_count++;
+	float avg_y = total_y / candidate_count;
+	line_hit *aligned_hits = drb_api->mrb_malloc(mrb, sizeof(line_hit) * candidate_count);
+	int aligned_count = 0;
+	for (int i = 0; i < candidate_count; ++i) {
+		if (fabs(candidates[i].world_pos_pixels.y - avg_y) < vertical_tolerance) {
+			aligned_hits[aligned_count++] = candidates[i];
 		}
 	}
-
-	drb_api->mrb_free(mrb, positions);
-	drb_api->mrb_free(mrb, shape_ids);
+	drb_api->mrb_free(mrb, candidates);
 
 	if (aligned_count < min_hits) {
-		drb_api->mrb_free(mrb, vertically_aligned_positions);
-		drb_api->mrb_free(mrb, vertically_aligned_shape_ids);
-		return results; // Return empty hash
+		drb_api->mrb_free(mrb, aligned_hits);
+		return results;
 	}
 
-	b2ShapeId *largest_group_ids = NULL;
-	b2Vec2 *largest_group_positions = NULL;
+	// TODO: Does Box2D give any guarantees on hit order - meaning is this necessary?
+	qsort(aligned_hits, aligned_count, sizeof(line_hit), compare_hits_by_x);
+
+	line_hit *largest_group = NULL;
 	int max_group_size = 0;
 	int current_group_start = 0;
-
-	for (int i = 1; i < aligned_count; ++i) {
-		if (vertically_aligned_positions[i].x - vertically_aligned_positions[i - 1].x > horizontal_tolerance) {
-			if (i - current_group_start > max_group_size) {
-				max_group_size = i - current_group_start;
-				largest_group_ids = &vertically_aligned_shape_ids[current_group_start];
-				largest_group_positions = &vertically_aligned_positions[current_group_start];
+	// find largest group, i.e. biggest grouping of vertically aligned shapes within horizontal limits
+	for (int i = 1; i <= aligned_count; ++i) {
+		// A group ends if we reach the end of the array OR the next shape is too far away
+		if (i == aligned_count || aligned_hits[i].world_pos_pixels.x - aligned_hits[i - 1].world_pos_pixels.x > horizontal_tolerance) {
+			int current_group_size = i - current_group_start;
+			if (current_group_size > max_group_size) {
+				max_group_size = current_group_size;
+				largest_group = &aligned_hits[current_group_start];
 			}
 			current_group_start = i;
 		}
 	}
-	if (aligned_count - current_group_start > max_group_size) {
-		max_group_size = aligned_count - current_group_start;
-		largest_group_ids = &vertically_aligned_shape_ids[current_group_start];
-		largest_group_positions = &vertically_aligned_positions[current_group_start];
-	}
 
+	// we can now assume the 'largest group' constitues an approximation of a horizontal line -> destroy the shapes it has and return the
+	// list of affected bodies from it
 	if (max_group_size >= min_hits) {
-		b2BodyId* unique_bodies = drb_api->mrb_malloc(mrb, sizeof(b2BodyId) * max_group_size);
+		mrb_value bodies_to_split_ary =
+			drb_api->mrb_hash_get(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "bodies_to_split")));
+		mrb_value cleared_points_ary =
+			drb_api->mrb_hash_get(mrb, results, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "cleared_points")));
+
+		b2BodyId *unique_bodies = drb_api->mrb_malloc(mrb, sizeof(b2BodyId) * max_group_size);
 		int unique_body_count = 0;
 
-		int shapes_destroyed = 0;
 		for (int i = 0; i < max_group_size; ++i) {
-			b2BodyId bid = b2Shape_GetBody(largest_group_ids[i]);
+			line_hit hit = largest_group[i];
+			b2BodyId body_id = b2Shape_GetBody(hit.shape_id);
+
 			bool found = false;
 			for (int j = 0; j < unique_body_count; j++) {
-				if (unique_bodies[j].index1 == bid.index1) {
+				if (unique_bodies[j].index1 == body_id.index1) {
 					found = true;
 					break;
 				}
 			}
 			if (!found) {
-				unique_bodies[unique_body_count++] = bid;
+				unique_bodies[unique_body_count++] = body_id;
 			}
 
-			// TODO: we should probably _NOT_ destroy any shapes here directly; what to do per shape destroyed depends on the case; we might destroy the last shape of a body?
-			b2DestroyShape(largest_group_ids[i], true);
-			shapes_destroyed++;
-
+			// Add the shape's position to the return data for visual effects
 			mrb_value hit_hash = drb_api->mrb_hash_new(mrb);
 			drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
-						  drb_api->mrb_float_value(mrb, largest_group_positions[i].x));
+								  drb_api->mrb_float_value(mrb, hit.world_pos_pixels.x));
 			drb_api->mrb_hash_set(mrb, hit_hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")),
-						  drb_api->mrb_float_value(mrb, largest_group_positions[i].y));
+								  drb_api->mrb_float_value(mrb, hit.world_pos_pixels.y));
 			drb_api->mrb_ary_push(mrb, cleared_points_ary, hit_hash);
-		}
-		assert(shapes_destroyed >= min_hits && "a minimum amount of min_hits shapes must be directly destroyed by any line clear!");
 
+			b2DestroyShape(hit.shape_id, true);
+		}
+
+		// Second, populate the Ruby array with the affected body objects
 		for (int i = 0; i < unique_body_count; i++) {
 			b2BodyId body_id = unique_bodies[i];
 			if (b2Body_IsValid(body_id)) {
-				body_user_context* buc = (body_user_context*)b2Body_GetUserData(body_id);
+				body_user_context *buc = (body_user_context *)b2Body_GetUserData(body_id);
 				if (buc && !mrb_nil_p(buc->body_obj)) {
 					drb_api->mrb_ary_push(mrb, bodies_to_split_ary, buc->body_obj);
 				}
@@ -634,10 +641,10 @@ static mrb_value world_raycast(mrb_state *mrb, mrb_value self) {
 		drb_api->mrb_free(mrb, unique_bodies);
 	}
 
-	drb_api->mrb_free(mrb, vertically_aligned_positions);
-	drb_api->mrb_free(mrb, vertically_aligned_shape_ids);
+	drb_api->mrb_free(mrb, aligned_hits);
 	return results;
 }
+
 static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 	b2WorldId *worldId = DATA_PTR(self);
 
@@ -682,22 +689,22 @@ static mrb_value world_step(mrb_state *mrb, mrb_value self) {
 }
 
 static mrb_value body_destroy(mrb_state *mrb, mrb_value self) {
-    b2BodyId *bodyId_ptr = DATA_PTR(self);
-    if (bodyId_ptr && b2Body_IsValid(*bodyId_ptr)) {
-        b2BodyId bodyId = *bodyId_ptr;
-        body_user_context *buc = (body_user_context *)b2Body_GetUserData(bodyId);
-        if (buc) {
-            drb_api->mrb_free(mrb, buc);
-        }
-        b2DestroyBody(bodyId);
-    }
+	b2BodyId *bodyId_ptr = DATA_PTR(self);
+	if (bodyId_ptr && b2Body_IsValid(*bodyId_ptr)) {
+		b2BodyId bodyId = *bodyId_ptr;
+		body_user_context *buc = (body_user_context *)b2Body_GetUserData(bodyId);
+		if (buc) {
+			drb_api->mrb_free(mrb, buc);
+		}
+		b2DestroyBody(bodyId);
+	}
 
-    if (bodyId_ptr) {
-        drb_api->mrb_free(mrb, bodyId_ptr);
-    }
-    DATA_PTR(self) = NULL;
+	if (bodyId_ptr) {
+		drb_api->mrb_free(mrb, bodyId_ptr);
+	}
+	DATA_PTR(self) = NULL;
 
-    return mrb_nil_value();
+	return mrb_nil_value();
 }
 
 static mrb_value body_has_collided(mrb_state *mrb, mrb_value self) {
@@ -713,31 +720,30 @@ static mrb_value body_get_info(mrb_state *mrb, mrb_value self) {
 	b2BodyId *bodyId = DATA_PTR(self);
 	b2Vec2 pos = b2Body_GetPosition(*bodyId);
 	b2Vec2 vel = b2Body_GetLinearVelocity(*bodyId);
-    float ang_vel = b2Body_GetAngularVelocity(*bodyId);
-    b2Rot rot = b2Body_GetRotation(*bodyId);
-    float angle = b2Rot_GetAngle(rot);
+	float ang_vel = b2Body_GetAngularVelocity(*bodyId);
+	b2Rot rot = b2Body_GetRotation(*bodyId);
+	float angle = b2Rot_GetAngle(rot);
 	bool awake = b2Body_IsAwake(*bodyId);
 
 	mrb_value hash = drb_api->mrb_hash_new(mrb);
 
-    b2Vec2 pos_pixels = meters_to_pixels(pos.x, pos.y);
-    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
-                          drb_api->mrb_float_value(mrb, pos_pixels.x));
-    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")),
-                          drb_api->mrb_float_value(mrb, pos_pixels.y));
+	b2Vec2 pos_pixels = meters_to_pixels(pos.x, pos.y);
+	drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "x")),
+						  drb_api->mrb_float_value(mrb, pos_pixels.x));
+	drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "y")),
+						  drb_api->mrb_float_value(mrb, pos_pixels.y));
 
-    b2Vec2 vel_pixels = meters_to_pixels(vel.x, vel.y);
-    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "vx")),
-                          drb_api->mrb_float_value(mrb, vel_pixels.x));
-    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "vy")),
-                          drb_api->mrb_float_value(mrb, vel_pixels.y));
+	b2Vec2 vel_pixels = meters_to_pixels(vel.x, vel.y);
+	drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "vx")),
+						  drb_api->mrb_float_value(mrb, vel_pixels.x));
+	drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "vy")),
+						  drb_api->mrb_float_value(mrb, vel_pixels.y));
 
-    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "angle")),
-                          drb_api->mrb_float_value(mrb, angle * RAD2DEG));
-    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "angular_velocity")),
-                          drb_api->mrb_float_value(mrb, ang_vel * RAD2DEG));
-    drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "awake")),
-                          mrb_bool_value(awake));
+	drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "angle")),
+						  drb_api->mrb_float_value(mrb, angle * RAD2DEG));
+	drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "angular_velocity")),
+						  drb_api->mrb_float_value(mrb, ang_vel * RAD2DEG));
+	drb_api->mrb_hash_set(mrb, hash, drb_api->mrb_symbol_value(drb_api->mrb_intern_lit(mrb, "awake")), mrb_bool_value(awake));
 
 	return hash;
 }
@@ -902,11 +908,11 @@ static mrb_value body_set_rotation(mrb_state *mrb, mrb_value self) {
 }
 
 static mrb_value body_set_angular_velocity(mrb_state *mrb, mrb_value self) {
-    b2BodyId *bodyId = DATA_PTR(self);
-    mrb_float velocity_deg_per_sec;
-    drb_api->mrb_get_args(mrb, "f", &velocity_deg_per_sec);
-    b2Body_SetAngularVelocity(*bodyId, velocity_deg_per_sec * DEGTORAD);
-    return mrb_nil_value();
+	b2BodyId *bodyId = DATA_PTR(self);
+	mrb_float velocity_deg_per_sec;
+	drb_api->mrb_get_args(mrb, "f", &velocity_deg_per_sec);
+	b2Body_SetAngularVelocity(*bodyId, velocity_deg_per_sec * DEGTORAD);
+	return mrb_nil_value();
 }
 
 static mrb_value body_apply_force_center(mrb_state *mrb, mrb_value self) {
@@ -951,7 +957,7 @@ static mrb_value body_apply_impulse_for_velocity(mrb_state *mrb, mrb_value self)
 	return mrb_nil_value();
 }
 
-#define MAX_ROT_DEGREES 5
+#define MAX_ROT_DEGREES 5 // TODO: this should be just up to the parameters to body_rotate -> move to Ruby
 
 // TODO: clean up this mess...
 static mrb_value body_rotate(mrb_state *mrb, mrb_value self) {
