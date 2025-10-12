@@ -166,7 +166,7 @@ static mrb_value world_create_body(mrb_state *mrb, mrb_value self) {
 	b2BodyType type = b2_staticBody;
 	if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "dynamic") == 0) {
 		type = b2_dynamicBody;
-		bodyDef.linearDamping = 0.1f;
+		bodyDef.linearDamping = 0.2f;
 		bodyDef.angularDamping = 0.6f;
 		bodyDef.enableSleep = allow_sleep;
 	} else if (strcmp(drb_api->mrb_str_to_cstr(mrb, type_str), "kinematic") == 0) {
@@ -382,6 +382,7 @@ static mrb_value body_create_i_shape(mrb_state *mrb, mrb_value self) {
 	drb_api->mrb_get_args(mrb, "ff|ff", &square_size_px, &density, &friction, &restitution);
 
 	b2ShapeDef shapeDef = b2DefaultShapeDef();
+
 	shapeDef.density = density;
 	shapeDef.material.friction = friction;
 	shapeDef.material.restitution = restitution;
@@ -404,8 +405,10 @@ static mrb_value body_create_chain_shape(mrb_state *mrb, mrb_value self) {
 
 	mrb_value points_array;
 	mrb_bool loop;
+	mrb_float friction = 1.0f;
+	mrb_float restitution = 0.0f;
 
-	drb_api->mrb_get_args(mrb, "A!b", &points_array, &loop);
+	drb_api->mrb_get_args(mrb, "A!b|ff", &points_array, &loop, &friction, &restitution);
 
 	int num_points = RARRAY_LEN(points_array);
 	if (num_points < 2) {
@@ -426,11 +429,20 @@ static mrb_value body_create_chain_shape(mrb_state *mrb, mrb_value self) {
 	}
 
 	b2ChainDef chainDef = b2DefaultChainDef();
+
 	chainDef.points = points;
 	chainDef.count = num_points;
 	chainDef.isLoop = loop;
 	chainDef.filter.categoryBits = GROUND_BIT;
 	chainDef.filter.maskBits = TETROMINO_BIT;
+
+    // Surface material from Ruby side (optional friction and restitution)
+    b2SurfaceMaterial surface_mat = (b2SurfaceMaterial){0};
+    surface_mat.friction = friction;
+    surface_mat.restitution = restitution;
+    chainDef.materials = &surface_mat;
+    chainDef.materialCount = 1;
+
 
 	b2CreateChain(*bodyId, &chainDef);
 
@@ -1007,9 +1019,9 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	// World Ruby class definition
 	struct RClass *World = drb_api->mrb_define_class_under(state, module, "World", base);
 	drb_api->mrb_define_method(state, World, "initialize", world_initialize, MRB_ARGS_NONE());
-	drb_api->mrb_define_method(state, World, "create_body", world_create_body, MRB_ARGS_ARG(3, 1));
+	drb_api->mrb_define_method(state, World, "create_body", world_create_body, MRB_ARGS_ARG(3, 4));
 	drb_api->mrb_define_method(state, World, "step", world_step, MRB_ARGS_NONE());
-	drb_api->mrb_define_method(state, World, "raycast", world_raycast, MRB_ARGS_ARG(4, 1));
+	drb_api->mrb_define_method(state, World, "raycast", world_raycast, MRB_ARGS_ARG(4, 3));
 
 	// Body Ruby class definition
 	struct RClass *Body = drb_api->mrb_define_class_under(state, module, "Body", base);
@@ -1020,7 +1032,8 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	drb_api->mrb_define_method(state, Body, "create_l_shape", body_create_l_shape, MRB_ARGS_ARG(2, 2));
 	drb_api->mrb_define_method(state, Body, "create_j_shape", body_create_j_shape, MRB_ARGS_ARG(2, 2));
 	drb_api->mrb_define_method(state, Body, "create_i_shape", body_create_i_shape, MRB_ARGS_ARG(2, 2));
-	drb_api->mrb_define_method(state, Body, "create_chain_shape", body_create_chain_shape, MRB_ARGS_REQ(2));
+	//TODO: create S and Z shapes...
+	drb_api->mrb_define_method(state, Body, "create_chain_shape", body_create_chain_shape, MRB_ARGS_ARG(2, 2));
 	drb_api->mrb_define_method(state, Body, "position", body_position, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "position_meters", body_position_meters, MRB_ARGS_NONE());
 	drb_api->mrb_define_method(state, Body, "extents", body_extents, MRB_ARGS_NONE());
