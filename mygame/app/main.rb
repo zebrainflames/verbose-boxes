@@ -82,6 +82,7 @@ class Game
     # Create ground chain with explicit material properties; ensure native extension is rebuilt when C changes
     args.state.ground.create_chain_shape(level_data[:terrain_points], false, gf, gr)
 
+
     # rendering setup
     unless @static_assets_setup
       args.render_target(:static_elements).w = args.grid.w
@@ -118,7 +119,6 @@ class Game
     args.state.blocks = []
     @active_block = nil
     args.state.game_state = :playing
-    args.state.game_over = false
 
     # Frame/cycle counters and timers
     @spawn_collision_check_frames = 0
@@ -172,9 +172,11 @@ class Game
 
     case args.state.game_state
     when :playing
-      update unless args.state.paused
+      update
+    when :paused
+      # paused: no update
     when :game_over
-      # Game over logic is handled in render and input
+      # Game over: no update
     end
 
     render
@@ -192,14 +194,20 @@ class Game
     # Physics tuning controls
     tune_physics_params
 
-    if args.state.game_over
+    if args.state.game_state == :game_over
       if args.inputs.keyboard.key_down.space
         reset_game
       end
       return
     end
 
-    args.state.paused = !args.state.paused if args.inputs.keyboard.key_down.p
+    if args.inputs.keyboard.key_down.p
+      if args.state.game_state == :paused
+        args.state.game_state = :playing
+      elsif args.state.game_state == :playing
+        args.state.game_state = :paused
+      end
+    end
 
     if @active_block
       args.state.horizontal = args.inputs.left_right * 5.0
@@ -282,7 +290,7 @@ class Game
     if @spawn_collision_check_frames > 0 && @last_spawned_block
       if @last_spawned_block.body.collided?
         putz "Last spawned block immediatelly collided!"
-        args.state.game_over = true
+        args.state.game_state = :game_over
       end
       @spawn_collision_check_frames -= 1
       @last_spawned_block = nil if @spawn_collision_check_frames <= 0
@@ -337,10 +345,20 @@ class Game
 
   def check_for_cleared_lines
     level_data = Levels.get(args.state.current_level_index)
-    scan_area = level_data[:scan_area]
+    level_scan = level_data[:scan_area]
+
+    # Determine vertical scan range dynamically: from terrain bottom to spawn height (top)
+    terrain_bottom = level_data[:terrain_points].map { |p| p[:y] || p["y"] }.min
+    spawn_top = args.grid.h - 100
+    scan_y = terrain_bottom
+    scan_h = [spawn_top - scan_y, 1].max
+
+    # Use level-provided x-range
+    scan_x = level_scan[:x]
+    scan_w = level_scan[:w]
 
     num_rays = 20
-    min_hits = 6
+    min_hits = level_data[:line_min_blocks] || 6
     vertical_tolerance = 10.0 # TODO: less magic numbers, use block size or something
     horiztonal_tolerance = 1.4 * 32.0
 
@@ -351,10 +369,10 @@ class Game
     total_bodies_to_split = []
 
     num_rays.times do |i|
-      ray_y = scan_area.y + (scan_area.h / num_rays) * i
+      ray_y = scan_y + (scan_h / num_rays) * i
       @raycast_y_coords << ray_y
-      ray_start_x = scan_area.x
-      ray_end_x = scan_area.x + scan_area.w
+      ray_start_x = scan_x
+      ray_end_x = scan_x + scan_w
 
       raycast_results = args.state.world.raycast(ray_start_x, ray_y, ray_end_x, ray_y, min_hits, vertical_tolerance, horiztonal_tolerance)
       next if raycast_results.empty?
@@ -455,13 +473,13 @@ class Game
                text: "FPS: #{args.gtk.current_framerate.round} | Score: #{args.state.score}" }
 
 
-    if args.state.paused
+    if args.state.game_state == :paused
       sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :pixel, r: 0, g: 0, b: 0, a: 150 }
       labels << { x: args.grid.center_x, y: args.grid.center_y, text: 'Paused', size_enum: 10,
                   alignment_enum: 1, r: 255, g: 255, b: 255, font: 'fonts/dirty_harold/dirty_harold.ttf' }
     end
 
-    if args.state.game_over
+    if args.state.game_state == :game_over
       sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :pixel, r: 0, g: 0, b: 0, a: 180 }
       labels << { x: args.grid.center_x, y: args.grid.center_y + 40, text: 'Game Over', size_enum: 10,
                   alignment_enum: 1, r: 255, g: 255, b: 255, font: 'fonts/dirty_harold/dirty_harold.ttf' }
@@ -483,8 +501,8 @@ class Game
 
       @raycast_y_coords.each do |ray_y|
         args.outputs.lines << {
-          x: 200, y: ray_y,
-          x2: 200 + 880, y2: ray_y,
+          x: level_data[:scan_area][:x], y: ray_y,
+          x2: level_data[:scan_area][:x] + level_data[:scan_area][:w], y2: ray_y,
           r: 255, g: 100, b: 100, a: 100
         }
       end
