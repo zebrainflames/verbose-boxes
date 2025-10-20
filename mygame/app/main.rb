@@ -376,7 +376,7 @@ class Game
     num_rays = 20
     min_hits = level_data.line_min_blocks || 6
     vertical_tolerance = 10.0 # TODO: less magic numbers, use block size or something
-    horiztonal_tolerance = 1.4 * 32.0
+    horiztonal_tolerance = 1.4 * 48.0
 
     @raycast_y_coords = []
     @cleared_shape_origins = []
@@ -425,7 +425,7 @@ class Game
     spawn_x = args.grid.w / 2 + (rand(100) - 50)
     spawn_y = args.grid.h - 100
 
-    new_block = send(block_type, args, spawn_x, spawn_y, square_size: 32, allow_sleep: true)
+    new_block = send(block_type, args, spawn_x, spawn_y, square_size: 48, allow_sleep: true)
 
     random_angle = [0, 90, 180, 270].sample
     new_block.angle = random_angle
@@ -521,13 +521,13 @@ class Game
     if args.state.profile
       args.outputs.primitives << args.gtk.framerate_diagnostics_primitives
 
-
-      # Also show physics tunables alongside profile data
       pf = args.state.physics.block_friction.round(3)
       pr = args.state.physics.block_restitution.round(3)
       labels << { x: 120.from_right, y: args.grid.h - 10, text: "Friction: #{pf}", size_enum: 2, r: 60, g: 60, b: 60, font: 'fonts/dirty_harold/dirty_harold.ttf' }
       labels << { x: 120.from_right, y: args.grid.h - 30, text: "Restitution: #{pr}", size_enum: 2, r: 60, g: 60, b: 60, font: 'fonts/dirty_harold/dirty_harold.ttf' }
 
+
+      level_data = Levels.get(0) # TODO: get current level data
       @raycast_y_coords.each do |ray_y|
         args.outputs.lines << {
           x: level_data[:scan_area][:x], y: ray_y,
