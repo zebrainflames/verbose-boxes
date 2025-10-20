@@ -36,8 +36,7 @@ TODO: study object linking (differences) on different platforms, together with t
 
 static drb_api_t *drb_api;
 // config
-static const float PIXELS_PER_METER = 32.0f; // NOTE: this still needs some tuning. We might want to bring the average energy level down in
-											 // individual box2d simulation islands
+static const float PIXELS_PER_METER = 32.0f; // NOTE: this still needs some tuning. We might want to bring the average energy level down in individual box2d simulation islands
 
 // global game-specific physics state
 static b2WorldDef mainWorldDef;
@@ -47,8 +46,7 @@ static Uint32 prev_tick = 0;
 
 // box2d raycasts are used to detect horizontal lines of blocks for the clearing logic
 #define MAX_RAY_HITS 50
-// raycast_collection_t is a specific collection type for use with the callback functions to get a list of shapes
-// colliding with a raycast
+// raycast_collection_t is a specific collection type for use with the callback functions to get a list of shapes colliding with a raycast
 typedef struct {
 	b2ShapeId hit_shapes[MAX_RAY_HITS];
 	int count;
@@ -60,8 +58,7 @@ static float raycast_callback(b2ShapeId shape_id, b2Vec2 point, b2Vec2 normal, f
 		collection->hit_shapes[collection->count] = shape_id;
 		collection->count++;
 	}
-	return 1.0f; // always returning 1.0f makes the raycast always go full length, i.e. not stop on collisions. There might be better ways
-				 // to do this
+	return 1.0f; // always returning 1.0f makes the raycast always go full length, i.e. not stop on collisions. There might be better ways to do this
 }
 
 // Collision filter categories
@@ -238,8 +235,7 @@ static mrb_value body_create_box_shape(mrb_state *mrb, mrb_value self) {
 
 // Helper function to create an offset polygon for a box using b2MakeBox and translation
 // This is used to easily create the tetriminos
-static void create_offset_box_fixture(b2BodyId bodyId, const b2ShapeDef *shapeDef, float box_width_px, float box_height_px,
-									  float offset_x_px, float offset_y_px) {
+static void create_offset_box_fixture(b2BodyId bodyId, const b2ShapeDef *shapeDef, float box_width_px, float box_height_px, float offset_x_px, float offset_y_px) {
 	float hw_m = (box_width_px / PIXELS_PER_METER) / 2.0f;
 	float hh_m = (box_height_px / PIXELS_PER_METER) / 2.0f;
 	float offset_x_m = offset_x_px / PIXELS_PER_METER;

@@ -69,7 +69,7 @@ end
 class Game
   include PhysicsHelpers
   attr_accessor :active_block
-  attr_reader :args, :block_types
+  attr_reader :args, :block_types, :score
 
 
   # Reset dynamic game state and frame counters to a known baseline
@@ -120,6 +120,9 @@ class Game
     @active_block = nil
     args.state.game_state = :playing
 
+    @score = 0
+    update_high_score
+
     # Frame/cycle counters and timers
     @spawn_collision_check_frames = 0
     @lock_delay_frames = 8
@@ -132,6 +135,13 @@ class Game
   def reset_game
     args.state.score = 0
     start_level(0)
+  end
+  
+  def update_high_score
+    @high_score ||= 0
+    if @score > @high_score
+      @high_score = @score
+    end
   end
 
   def initialize(args)
@@ -291,6 +301,7 @@ class Game
       if @last_spawned_block.body.collided?
         putz "Last spawned block immediatelly collided!"
         args.state.game_state = :game_over
+        update_high_score
       end
       @spawn_collision_check_frames -= 1
       @last_spawned_block = nil if @spawn_collision_check_frames <= 0
@@ -314,28 +325,29 @@ class Game
   end
 
   def split_body(block_info)
-    original_body = block_info[:body]
+    original_body = block_info.body
     info = original_body.get_info
     remaining_shapes = original_body.get_shapes_info
 
     if remaining_shapes.any?
-      angle_rad = info[:angle] * (Math::PI / 180.0)
+      angle_rad = info.angle * (Math::PI / 180.0)
       cos_a = Math.cos(angle_rad)
       sin_a = Math.sin(angle_rad)
 
       remaining_shapes.each do |shape|
         # Calculate world position of the new body from the shape's relative position
-        rotated_x = shape[:x] * cos_a - shape[:y] * sin_a
-        rotated_y = shape[:x] * sin_a + shape[:y] * cos_a
-        new_x = info[:x] + rotated_x
-        new_y = info[:y] + rotated_y
+        rotated_x = shape.x * cos_a - shape.y * sin_a
+        rotated_y = shape.x * sin_a + shape.y * cos_a
+        new_x = info.x + rotated_x
+        new_y = info.y + rotated_y
 
         # Create a new body for the shape, passing initial velocities
-        new_body = create_dynamic_box(args, new_x, new_y, shape[:w], shape[:h],
-                                      vx: info[:vx], vy: info[:vy], angular_velocity: info[:angular_velocity])
+        new_body = create_dynamic_box(args, new_x, new_y, shape.w, shape.h,
+                                      vx: info.vx, vy: info.vy, angular_velocity: info.angular_velocity)
 
         # Add to game state
-        args.state.blocks << { body: new_body, color: block_info[:color] }      end
+        args.state.blocks << { body: new_body, color: block_info[:color] }
+      end
     end
 
     # Destroy original body and remove from game state
@@ -343,22 +355,26 @@ class Game
     args.state.blocks.delete(block_info)
   end
 
+  def count_score destroyed_count
+    ((destroyed_count / 2.0) ** 2).round
+  end
+
   def check_for_cleared_lines
     level_data = Levels.get(args.state.current_level_index)
-    level_scan = level_data[:scan_area]
+    level_scan = level_data.scan_area
 
     # Determine vertical scan range dynamically: from terrain bottom to spawn height (top)
-    terrain_bottom = level_data[:terrain_points].map { |p| p[:y] || p["y"] }.min
+    terrain_bottom = level_data.terrain_points.map { |p| p.y }.min
     spawn_top = args.grid.h - 100
     scan_y = terrain_bottom
     scan_h = [spawn_top - scan_y, 1].max
 
     # Use level-provided x-range
-    scan_x = level_scan[:x]
-    scan_w = level_scan[:w]
+    scan_x = level_scan.x
+    scan_w = level_scan.w
 
     num_rays = 20
-    min_hits = level_data[:line_min_blocks] || 6
+    min_hits = level_data.line_min_blocks || 6
     vertical_tolerance = 10.0 # TODO: less magic numbers, use block size or something
     horiztonal_tolerance = 1.4 * 32.0
 
@@ -367,7 +383,7 @@ class Game
     @all_raycast_hits = []
 
     total_bodies_to_split = []
-
+    cleared_shapes_count = 0
     num_rays.times do |i|
       ray_y = scan_y + (scan_h / num_rays) * i
       @raycast_y_coords << ray_y
@@ -377,6 +393,8 @@ class Game
       raycast_results = args.state.world.raycast(ray_start_x, ray_y, ray_end_x, ray_y, min_hits, vertical_tolerance, horiztonal_tolerance)
       next if raycast_results.empty?
 
+      cleared_shapes_count += raycast_results.cleared_points.size
+      
       @cleared_shape_origins.concat raycast_results.cleared_points
       args.state.score += raycast_results.cleared_points.length
       total_bodies_to_split.concat raycast_results.bodies_to_split
@@ -385,6 +403,11 @@ class Game
         color_index = i % @debug_colors.size
         @all_raycast_hits << { points: raycast_results.all_hits, color_index: color_index } 
       end
+    end
+
+    unless cleared_shapes_count.zero?
+      puts "Removed #{cleared_shapes_count} shapes"
+      @score += count_score cleared_shapes_count
     end
 
     total_bodies_to_split.uniq! # Process each affected body only once
@@ -411,7 +434,6 @@ class Game
   end
 
   def render
-
     sprites = []
     labels = []
 
@@ -429,9 +451,10 @@ class Game
 
       shapes_info = body.get_shapes_info
 
-      shapes_info.each do |shape|
+      shapes_info.each_with_index do |shape, index|
         rel_x = shape[:x]
         rel_y = shape[:y]
+
 
         rotated_rel_x = rel_x * Math.cos(body_angle_rad) - rel_y * Math.sin(body_angle_rad)
         rotated_rel_y = rel_x * Math.sin(body_angle_rad) + rel_y * Math.cos(body_angle_rad)
@@ -440,16 +463,18 @@ class Game
         final_y = body_pos[:y] + rotated_rel_y
 
         extra_size_px = 1 # a tiny bit of extra width and height to the blocks, as the texture has some buffer
+        tile_sprite_count = 3
+        i = index % tile_sprite_count + 1
         sprites << {
           x: final_x,
           y: final_y,
           w: shape[:w] + extra_size_px,
           h: shape[:h] + extra_size_px,
-          path: 'sprites/tile_crumpled1.png',
+          path: "sprites/tile_test#{i}.png",
           r: tint[0],
           g: tint[1],
           b: tint[2],
-          a: 255, # tint[3]
+          a: 250, # tint[3]
           anchor_x: 0.5,
           anchor_y: 0.5,
           angle: body_angle_degrees
@@ -481,13 +506,17 @@ class Game
 
     if args.state.game_state == :game_over
       sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :pixel, r: 0, g: 0, b: 0, a: 180 }
-      labels << { x: args.grid.center_x, y: args.grid.center_y + 40, text: 'Game Over', size_enum: 10,
+      labels << { x: args.grid.center_x, y: args.grid.center_y + 60, text: 'Game Over', size_enum: 10,
                   alignment_enum: 1, r: 255, g: 255, b: 255, font: 'fonts/dirty_harold/dirty_harold.ttf' }
-      labels << { x: args.grid.center_x, y: args.grid.center_y - 10, text: "Final Score: #{args.state.score}", size_enum: 4,
-                  alignment_enum: 1, r: 240, g: 240, b: 240, font: 'fonts/dirty_harold/dirty_harold.ttf' }
-      labels << { x: args.grid.center_x, y: args.grid.center_y - 60, text: 'Press R to restart', size_enum: 4,
-                  alignment_enum: 1, r: 240, g: 240, b: 240, font: 'fonts/dirty_harold/dirty_harold.ttf' }
+
+      labels << { x: args.grid.center_x, y: args.grid.center_y - 10, text: "Score: #{@score}", size_enum: 4, alignment_enum: 1, r: 240, g: 240, b: 240, font: 'fonts/dirty_harold/dirty_harold.ttf' }
+      labels << { x: args.grid.center_x, y: args.grid.center_y - 60, text: "High score: #{@high_score}", size_enum: 4, alignment_enum: 1, r: 240, g: 240, b: 240, font: 'fonts/dirty_harold/dirty_harold.ttf' }
+      labels << { x: args.grid.center_x, y: args.grid.center_y - 120, text: 'Press R to restart', size_enum: 4, alignment_enum: 1, r: 240, g: 240, b: 240, font: 'fonts/dirty_harold/dirty_harold.ttf' }
     end
+
+    args.outputs.sprites << sprites
+    args.outputs.labels << labels
+
 
     if args.state.profile
       args.outputs.primitives << args.gtk.framerate_diagnostics_primitives
