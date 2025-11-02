@@ -365,6 +365,62 @@ static mrb_value body_create_j_shape(mrb_state *mrb, mrb_value self) {
 	return mrb_nil_value();
 }
 
+// S-shape. Origin is at the center of the shape
+//    #
+//  ##
+//  #
+static mrb_value body_create_s_shape(mrb_state *mrb, mrb_value self) {
+	b2BodyId *bodyId = DATA_PTR(self);
+	mrb_float square_size_px, density;
+	mrb_float friction = 0.5f;
+	mrb_float restitution = 0.1f;
+	drb_api->mrb_get_args(mrb, "ff|ff", &square_size_px, &density, &friction, &restitution);
+
+	b2ShapeDef shapeDef = b2DefaultShapeDef();
+	shapeDef.density = density;
+	shapeDef.material.friction = friction;
+	shapeDef.material.restitution = restitution;
+	shapeDef.enableContactEvents = true;
+	shapeDef.enableSensorEvents = true;
+	shapeDef.filter.categoryBits = TETROMINO_BIT;
+	shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
+
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -square_size_px, 0);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, square_size_px);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, square_size_px, square_size_px);
+
+	return mrb_nil_value();
+}
+
+// Z-shape (mirrored S). Origin is at the center of the shape
+//  #
+//  ##
+//   #
+static mrb_value body_create_z_shape(mrb_state *mrb, mrb_value self) {
+	b2BodyId *bodyId = DATA_PTR(self);
+	mrb_float square_size_px, density;
+	mrb_float friction = 0.5f;
+	mrb_float restitution = 0.1f;
+	drb_api->mrb_get_args(mrb, "ff|ff", &square_size_px, &density, &friction, &restitution);
+
+	b2ShapeDef shapeDef = b2DefaultShapeDef();
+	shapeDef.density = density;
+	shapeDef.material.friction = friction;
+	shapeDef.material.restitution = restitution;
+	shapeDef.enableContactEvents = true;
+	shapeDef.enableSensorEvents = true;
+	shapeDef.filter.categoryBits = TETROMINO_BIT;
+	shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
+
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, 0);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, square_size_px, 0);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, square_size_px);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -square_size_px, square_size_px);
+
+	return mrb_nil_value();
+}
+
 // I-shape. Origin is the center of the 4-block segment.
 //   #
 //   #
@@ -388,10 +444,10 @@ static mrb_value body_create_i_shape(mrb_state *mrb, mrb_value self) {
 	shapeDef.filter.maskBits = GROUND_BIT | SENSOR_BIT | TETROMINO_BIT;
 
 	float half = square_size_px / 2.0f;
-	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -half - square_size_px, 0);
-	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, half + square_size_px, 0);
-	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, half, 0);
-	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, -half, 0);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, -half - square_size_px);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, half + square_size_px);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, half);
+	create_offset_box_fixture(*bodyId, &shapeDef, square_size_px, square_size_px, 0, -half);
 
 	return mrb_nil_value();
 }
@@ -1028,6 +1084,8 @@ void drb_register_c_extensions_with_api(mrb_state *state, struct drb_api_t *api)
 	drb_api->mrb_define_method(state, Body, "create_l_shape", body_create_l_shape, MRB_ARGS_ARG(2, 2));
 	drb_api->mrb_define_method(state, Body, "create_j_shape", body_create_j_shape, MRB_ARGS_ARG(2, 2));
 	drb_api->mrb_define_method(state, Body, "create_i_shape", body_create_i_shape, MRB_ARGS_ARG(2, 2));
+	drb_api->mrb_define_method(state, Body, "create_s_shape", body_create_s_shape, MRB_ARGS_ARG(2, 2));
+	drb_api->mrb_define_method(state, Body, "create_z_shape", body_create_z_shape, MRB_ARGS_ARG(2, 2));
 	//TODO: create S and Z shapes...
 	drb_api->mrb_define_method(state, Body, "create_chain_shape", body_create_chain_shape, MRB_ARGS_ARG(2, 2));
 	drb_api->mrb_define_method(state, Body, "position", body_position, MRB_ARGS_NONE());

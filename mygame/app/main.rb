@@ -64,10 +64,27 @@ module PhysicsHelpers
     body.create_i_shape(square_size, density, friction, restitution)
     body
   end
+
+  def create_s_block(args, x, y, square_size: 20, density: 1.0, allow_sleep: true)
+    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep)
+    friction = args.state.physics&.block_friction || 0.5
+    restitution = args.state.physics&.block_restitution || 0.1
+    body.create_s_shape(square_size, density, friction, restitution)
+    body
+  end
+
+  def create_z_block(args, x, y, square_size: 20, density: 1.0, allow_sleep: true)
+    body = create_body(args, 'dynamic', x, y, allow_sleep: allow_sleep)
+    friction = args.state.physics&.block_friction || 0.5
+    restitution = args.state.physics&.block_restitution || 0.1
+    body.create_z_shape(square_size, density, friction, restitution)
+    body
+  end
 end
 
 class Game
   include PhysicsHelpers
+  INITIAL_PHYSICS = { block_friction: 0.9, block_restitution: 0.01, ground_friction: 1.0, ground_restitution: 0.0, gravity: -1.0 }.freeze
   attr_accessor :active_block
   attr_reader :args, :block_types, :score
 
@@ -80,7 +97,7 @@ class Game
     gf = args.state.physics&.ground_friction || 1.0
     gr = args.state.physics&.ground_restitution || 0.0
     # Create ground chain with explicit material properties; ensure native extension is rebuilt when C changes
-    args.state.ground.create_chain_shape(level_data[:terrain_points], false, gf, gr)
+    args.state.ground.create_chain_shape(level_data.terrain_points, false, gf, gr)
 
 
     # rendering setup
@@ -112,8 +129,50 @@ class Game
           a: 220
         }
       end
+
+      # create the next piece box render target
+      box_w = 220
+      box_h = 220
+
+      args.render_target(:next_piece_box).w = box_w
+      args.render_target(:next_piece_box).h = box_h
+      args.render_target(:next_piece_box).background_color = [0, 0, 0, 0]
+
+      lines = [
+        { x1: 0, y1: 0, x2: box_w, y2: 0 },
+        { x1: 0, y1: 0, x2: 0, y2: box_h },
+        { x1: box_w, y1: 0, x2: box_w, y2: box_h },
+        { x1: 0, y1: box_h, x2: box_w, y2: box_h },
+      ]
+
+      # TODO: shareable render_from_points or draw_line
+      lines.each do |line|
+        p1 = { x: line[:x1], y: line[:y1] }
+        p2 = { x: line[:x2], y: line[:y2] }
+
+        angle = Math.atan2(p2.y - p1.y, p2.x - p1.x) * (180 / Math::PI)
+        length = Math.sqrt((p2.x - p1.x)**2 + (p2.y - p1.y)**2)
+
+        mx = (p1[:x] + p2[:x]) / 2.0
+        my = (p1[:y] + p2[:y]) / 2.0
+
+        args.render_target(:next_piece_box).sprites << {
+          x: mx,
+          y: my,
+          w: length,
+          h: 12, # Height of the texture
+          path: 'sprites/line_test.png',
+          angle: angle,
+          anchor_x: 0.5,
+          anchor_y: 0.5,
+          a: 220
+        }
+      end
+
       @static_assets_setup = true
     end
+
+    
 
     args.state.current_level_index = level_index
     args.state.blocks = []
@@ -128,11 +187,14 @@ class Game
     @lock_delay_frames = 8
     @spawn_delay_frames = 45
     @touching_frames = 0
-    @pending_spawn_frames = 0 # trigger initial spawn via countdown
     @last_spawned_block = nil
+    @pending_spawn_frames = 0 # trigger initial spawn via countdown
+
+    generate_next_block
   end
 
   def reset_game
+    args.state.physics = INITIAL_PHYSICS.dup
     args.state.score = 0
     start_level(0)
   end
@@ -146,17 +208,22 @@ class Game
 
   def initialize(args)
     @args = args
-    @block_types = [:create_t_block, :create_o_block, :create_l_block, :create_j_block, :create_i_block]
-    @colors = ['violet', 'orange', 'blue', 'green', 'red', 'yellow'] # 'yellow', 'red'
+    @block_types = [:create_t_block, :create_o_block, :create_l_block, :create_j_block, :create_i_block, :create_s_block, :create_z_block]
+    @colors = ['violet', 'orange', 'blue', 'green', 'red', 'yellow', 'indigo'] # 'yellow', 'red'
     @pastel_colors = {
       'violet' => [200, 160, 220],
       'yellow' => [253, 253, 150],
       'orange' => [255, 204, 153],
       'blue'   => [173, 216, 230],
       'red'    => [255, 153, 153],
-      'green'  => [153, 255, 153]
+      'green'  => [153, 255, 153],
+      'indigo' => [153, 153, 255]
     }
     @active_block = nil
+    @square_size = 40
+    @next_block_type = nil
+    @next_block_color = nil
+    @next_block_body = nil
     @all_shapes_hit = []
     @all_raycast_hits = []
     @debug_colors = [
@@ -169,7 +236,7 @@ class Game
 
   def setup
     # physics tunables (Ruby-side) for quick iteration on gameplay feel
-    args.state.physics ||= { block_friction: 0.8, block_restitution: 0.05, ground_friction: 1.0, ground_restitution: 0.0 }
+    args.state.physics ||= INITIAL_PHYSICS.dup
 
     args.state.blocks ||= []
     args.state.profile ||= false
@@ -201,7 +268,6 @@ class Game
       return
     end
 
-    # Physics tuning controls
     tune_physics_params
 
     if args.state.game_state == :game_over
@@ -222,9 +288,9 @@ class Game
     if @active_block
       args.state.horizontal = args.inputs.left_right * 5.0
       args.state.vertical = if args.inputs.up_down < 0.0
-                              -10.0
+                              10.0 * args.inputs.up_down
                             else
-                              -2.4
+                              args.state.physics.gravity
                             end
       rot_dir = if args.inputs.keyboard.key_down_or_held? 'q'
                   1.0
@@ -255,6 +321,15 @@ class Game
       r = args.state.physics.block_restitution + 0.05
       args.state.physics.block_restitution = r < 0.0 ? 0.0 : (r > 1.0 ? 1.0 : r)
     end
+
+    # gravity: k and l
+    if args.inputs.keyboard.key_down? :k
+      g = args.state.physics.gravity - 0.2
+      args.state.physics.gravity = g < -20.0 ? -20.0 : (g > 0.0 ? 0.0 : g)
+    elsif args.inputs.keyboard.key_down? :l
+      g = args.state.physics.gravity + 0.2
+      args.state.physics.gravity = g < -20.0 ? -20.0 : (g > 0.0 ? 0.0 : g)
+    end
   end
 
   def update
@@ -270,11 +345,12 @@ class Game
     args.state.world.step
 
     # Post-step: handle lock delay for active block collisions, spawn delay etc.
+    # TODO: review the post-update steps; control isn't granular enough atm
     if @active_block
       if @active_block.body.collided?
         @touching_frames += 1
         if @touching_frames >= @lock_delay_frames
-          @active_block.body.apply_impulse_for_velocity(0.0, -2.4)
+          @active_block.body.apply_impulse_for_velocity(0.0, args.state.physics.gravity)
           @active_block = nil
           @touching_frames = 0
           @pending_spawn_frames = @spawn_delay_frames
@@ -346,7 +422,7 @@ class Game
                                       vx: info.vx, vy: info.vy, angular_velocity: info.angular_velocity)
 
         # Add to game state
-        args.state.blocks << { body: new_body, color: block_info[:color] }
+        args.state.blocks << { body: new_body, color: block_info.color }
       end
     end
 
@@ -375,7 +451,7 @@ class Game
 
     num_rays = 20
     min_hits = level_data.line_min_blocks || 6
-    vertical_tolerance = 10.0 # TODO: less magic numbers, use block size or something
+    vertical_tolerance = 16.0 # TODO: less magic numbers, use block size or something
     horiztonal_tolerance = 1.4 * 48.0
 
     @raycast_y_coords = []
@@ -408,27 +484,34 @@ class Game
     unless cleared_shapes_count.zero?
       puts "Removed #{cleared_shapes_count} shapes"
       @score += count_score cleared_shapes_count
+      args.state.physics.gravity -= (cleared_shapes_count / 10) * 0.1
     end
 
-    total_bodies_to_split.uniq! # Process each affected body only once
+    total_bodies_to_split.uniq!
 
     total_bodies_to_split.each do |body_to_split|
-      block_info = args.state.blocks.find { |b| b[:body] == body_to_split }
+      block_info = args.state.blocks.find { |b| b.body == body_to_split }
       split_body(block_info) if block_info
     end
   end
 
-  def spawn_random_tetrimino
+  def generate_next_block
+    @next_block_body&.destroy
     n = rand(@block_types.size)
-    block_type = @block_types[n]
-    color_name = @colors[n]
-    spawn_x = args.grid.w / 2 + (rand(100) - 50)
+    @next_block_type = @block_types[n]
+    @next_block_color = @colors[n]
+    @next_block_body = send(@next_block_type, args, 0, 0, square_size: @square_size, allow_sleep: true)
+  end
+
+  def spawn_random_tetrimino
+    block_type = @next_block_type
+    color_name = @next_block_color
+    generate_next_block
+
+    spawn_x = args.grid.w / 2
     spawn_y = args.grid.h - 100
 
-    new_block = send(block_type, args, spawn_x, spawn_y, square_size: 48, allow_sleep: true)
-
-    random_angle = [0, 90, 180, 270].sample
-    new_block.angle = random_angle
+    new_block = send(block_type, args, spawn_x, spawn_y, square_size: @square_size, allow_sleep: true)
 
     args.state.blocks << { body: new_block, color: color_name }
   end
@@ -441,8 +524,8 @@ class Game
 
     # NOTE: this is quite heavy atm and could do with a bunch of optimization
     args.state.blocks.each do |block_info|
-      body = block_info[:body]
-      color_name = block_info[:color]
+      body = block_info.body
+      color_name = block_info.color
       tint = @pastel_colors[color_name]
 
       body_pos = body.position
@@ -452,15 +535,15 @@ class Game
       shapes_info = body.get_shapes_info
 
       shapes_info.each_with_index do |shape, index|
-        rel_x = shape[:x]
-        rel_y = shape[:y]
+        rel_x = shape.x
+        rel_y = shape.y
 
 
         rotated_rel_x = rel_x * Math.cos(body_angle_rad) - rel_y * Math.sin(body_angle_rad)
         rotated_rel_y = rel_x * Math.sin(body_angle_rad) + rel_y * Math.cos(body_angle_rad)
 
-        final_x = body_pos[:x] + rotated_rel_x
-        final_y = body_pos[:y] + rotated_rel_y
+        final_x = body_pos.x + rotated_rel_x
+        final_y = body_pos.y + rotated_rel_y
 
         extra_size_px = 1 # a tiny bit of extra width and height to the blocks, as the texture has some buffer
         tile_sprite_count = 3
@@ -468,8 +551,8 @@ class Game
         sprites << {
           x: final_x,
           y: final_y,
-          w: shape[:w] + extra_size_px,
-          h: shape[:h] + extra_size_px,
+          w: shape.w + extra_size_px,
+          h: shape.h + extra_size_px,
           path: "sprites/tile_test#{i}.png",
           r: tint[0],
           g: tint[1],
@@ -483,8 +566,8 @@ class Game
     end
 
     @all_raycast_hits.each do |hit_group|
-      color = @debug_colors[hit_group[:color_index]]
-      hit_group[:points].each do |p|
+      color = @debug_colors[hit_group.color_index]
+      hit_group.points.each do |p|
         sprites << { x: p.x, y: p.y, w: 5, h: 5, path: :pixel, r: color[0], g: color[1], b: color[2], a: 200, anchor_x: 0.5, anchor_y: 0.5 }
       end
     end
@@ -493,10 +576,11 @@ class Game
       sprites << { x: s.x, y: s.y, w: 12, h: 12, path: :pixel, r:153, g:255, b:153, a:255, anchor_x: 0.5, anchor_y: 0.5 }
     end
 
-    labels << { alignment_enum: 1, font: 'fonts/dirty_harold/dirty_harold.ttf', x: args.grid.w / 2.0,
-               y: args.grid.h - 10, r: 20, g: 20, b: 20, 
-               text: "FPS: #{args.gtk.current_framerate.round} | Score: #{args.state.score}" }
+    labels << { alignment_enum: 0, font: 'fonts/dirty_harold/dirty_harold.ttf', x: 10, y: args.grid.h - 10, r: 20, g: 20, b: 20, size_enum: 4, text: "Score: #{args.state.score}" }
+    labels << { alignment_enum: 0, font: 'fonts/dirty_harold/dirty_harold.ttf', x: 10, y: args.grid.h - 40, r: 20, g: 20, b: 20, size_enum: 2, text: "Gravity: #{args.state.physics.gravity.round(2)}" }
+    labels << { alignment_enum: 1, font: 'fonts/dirty_harold/dirty_harold.ttf', x: args.grid.w / 2.0, y: args.grid.h - 10, r: 20, g: 20, b: 20, text: "FPS: #{args.gtk.current_framerate.round}" }
 
+    render_next_block_preview(sprites, labels)
 
     if args.state.game_state == :paused
       sprites << { x: 0, y: 0, w: args.grid.w, h: args.grid.h, path: :pixel, r: 0, g: 0, b: 0, a: 150 }
@@ -514,24 +598,22 @@ class Game
       labels << { x: args.grid.center_x, y: args.grid.center_y - 120, text: 'Press R to restart', size_enum: 4, alignment_enum: 1, r: 240, g: 240, b: 240, font: 'fonts/dirty_harold/dirty_harold.ttf' }
     end
 
-    args.outputs.sprites << sprites
-    args.outputs.labels << labels
-
-
     if args.state.profile
       args.outputs.primitives << args.gtk.framerate_diagnostics_primitives
 
       pf = args.state.physics.block_friction.round(3)
       pr = args.state.physics.block_restitution.round(3)
+      pg = args.state.physics.gravity.round(3)
       labels << { x: 120.from_right, y: args.grid.h - 10, text: "Friction: #{pf}", size_enum: 2, r: 60, g: 60, b: 60, font: 'fonts/dirty_harold/dirty_harold.ttf' }
       labels << { x: 120.from_right, y: args.grid.h - 30, text: "Restitution: #{pr}", size_enum: 2, r: 60, g: 60, b: 60, font: 'fonts/dirty_harold/dirty_harold.ttf' }
+      labels << { x: 120.from_right, y: args.grid.h - 50, text: "Gravity: #{pg}", size_enum: 2, r: 60, g: 60, b: 60, font: 'fonts/dirty_harold/dirty_harold.ttf' }
 
 
       level_data = Levels.get(0) # TODO: get current level data
       @raycast_y_coords.each do |ray_y|
         args.outputs.lines << {
-          x: level_data[:scan_area][:x], y: ray_y,
-          x2: level_data[:scan_area][:x] + level_data[:scan_area][:w], y2: ray_y,
+          x: level_data.scan_area.x, y: ray_y,
+          x2: level_data.scan_area.x + level_data.scan_area.w, y2: ray_y,
           r: 255, g: 100, b: 100, a: 100
         }
       end
@@ -539,6 +621,49 @@ class Game
 
     args.outputs.sprites << sprites
     args.outputs.labels << labels
+  end
+
+  def render_next_block_preview(sprites, labels)
+    box_w = 220
+    box_h = 220
+    box_x = box_w.from_right - 40
+    box_y = box_h.from_top - 40
+
+    labels << { x: box_x, y: args.grid.h - 10, text: "Next piece:", size_enum: 2, r: 20, g: 20, b: 20, font: 'fonts/dirty_harold/dirty_harold.ttf' }
+
+    sprites << { x: box_x, y: box_y, w: box_w, h: box_h, path: :next_piece_box }
+
+    if @next_block_body
+      shapes_info = @next_block_body.get_shapes_info
+
+      tint = @pastel_colors[@next_block_color]
+
+      shapes_info.each_with_index do |shape, index|
+        rel_x = shape.x
+        rel_y = shape.y
+
+        final_x = box_x + box_w / 2 + rel_x
+        final_y = box_y + box_h / 2 + rel_y
+
+        extra_size_px = 1 # a tiny bit of extra width and height to the blocks, as the texture has some buffer
+        tile_sprite_count = 3
+        i = index % tile_sprite_count + 1
+        sprites << {
+          x: final_x,
+          y: final_y,
+          w: shape.w + extra_size_px,
+          h: shape.h + extra_size_px,
+          path: "sprites/tile_test#{i}.png",
+          r: tint[0],
+          g: tint[1],
+          b: tint[2],
+          a: 250, # tint[3]
+          anchor_x: 0.5,
+          anchor_y: 0.5,
+          angle: 0
+        }
+      end
+    end
   end
 end
 

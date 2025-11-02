@@ -1,37 +1,39 @@
 module Levels
   EDGE_LEFT = 350
   EDGE_RIGHT = EDGE_LEFT.from_right
+  # Common level setup:
+  #   - walls at 350 pixels from edges
+  #   - ground width 580 pixels
+  #   - ground height 80 pixels
+  GROUND_HEIGHT = 80
   LEVEL_DATA = [
     {
       name: 'Bumpy Flats',
       target_score: 10,
       line_min_blocks: 10,
       terrain_points: [
-        # Testing general settings for levels -- 
-        # walls at 360 pixels from edges, ground width 560 pixels, ground height
-        # 100 pixels
         # right wall:
         { x: EDGE_RIGHT + 80, y: 1000 },
         { x: EDGE_RIGHT + 60, y: 820 },
         { x: EDGE_RIGHT + 20, y: 520 },
-        { x: EDGE_RIGHT, y: 100 },
+        { x: EDGE_RIGHT, y: 80 },
         # 'ground'
-        { x: 380.from_right, y: 100 }, 
-        { x: 380.from_right, y: 120 },
-        { x: 420.from_right, y: 120 },
+        { x: 380.from_right, y: 80 }, 
+        { x: 380.from_right, y: 100 },
         { x: 420.from_right, y: 100 },
-        { x: 520, y: 100 },
-        { x: 520, y: 140 },
-        { x: 480, y: 140 },
-        { x: 400, y: 160 },
-        { x: 380, y: 160 },
+        { x: 420.from_right, y: 80 },
+        { x: 520, y: 80 },
+        { x: 520, y: 120 },
+        { x: 480, y: 120 },
+        { x: 400, y: 140 },
+        { x: 380, y: 140 },
         # left wall
-        { x: EDGE_LEFT, y: 140 },
+        { x: EDGE_LEFT, y: 120 },
         { x: EDGE_LEFT - 20, y: 520 },
         { x: EDGE_LEFT - 60, y: 820 },
         { x: EDGE_LEFT - 80, y: 1000 }
       ],
-      scan_area: { x: 200, y: 96, w: 880, h: 400 }
+      scan_area: { x: 200, y: 76, w: 880, h: 600 }
     },
     {
       name: 'Jagged Peaks',
